@@ -1,0 +1,78 @@
+# =============================================================================
+# Viche — root Cargo workspace manifest.
+#
+# The Rust side of Viche is split into three workspace members:
+#
+#   * crates/viche-core      — shared primitives reused by relayer + frontend
+#                              (Poseidon Merkle tree, BN254 field helpers, the
+#                              JSON wire types exchanged over HTTP).
+#   * crates/viche-relayer   — Phase 2: an Axum HTTP service that accepts a ZK
+#                              proof + nullifier from the browser, signs and
+#                              broadcasts the `castVote` transaction via alloy
+#                              so end users vote gasless.
+#   * crates/viche-frontend  — Phase 3: a Leptos SPA compiled to
+#                              wasm32-unknown-unknown that connects the user's
+#                              browser wallet, generates the Groth16 proof
+#                              in-page via snarkjs/wasm, and posts it to the
+#                              relayer.
+#
+# Phase 1 (this commit) only scaffolds the workspace + crates so that
+# `cargo check --workspace` is green. The crate-level `src/lib.rs` files hold
+# documented TODO stubs that point at the phase that will implement them.
+# =============================================================================
+[workspace]
+resolver = "2"
+members = [
+    "crates/viche-core",
+    "crates/viche-relayer",
+    "crates/viche-frontend",
+]
+
+# ---------------------------------------------------------------------------
+# Shared metadata so individual crates stay terse.
+# ---------------------------------------------------------------------------
+[workspace.package]
+version       = "0.1.0"
+edition       = "2021"
+rust-version  = "1.74"
+license       = "Apache-2.0"
+repository    = "https://github.com/Arklingh/Viche"
+authors       = ["Arklingh"]
+description   = "Decentralized anonymous voting dApp (ZK / Solidity / Rust WASM)"
+
+# ---------------------------------------------------------------------------
+# Centralised dependency versions. Each crate opts in with
+# `dep.workspace = true`. Pinning here keeps the whole stack on one
+# alloy / tokio / axum release, which matters for WASM + native parity.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# === Async runtime / HTTP (relayer, Phase 2) ===
+tokio       = { version = "1.40", features = ["full"] }
+axum        = "0.7"
+tower       = "0.5"
+tower-http  = { version = "0.6", features = ["cors", "trace"] }
+
+# === Ethereum RPC (relayer, Phase 2) ===
+# `full` pulls in provider/contract/signer; frontend crate disables the
+# signer/network features it cannot use in the browser.
+alloy       = { version = "0.3", features = ["full"] }
+
+# === Serde / JSON ===
+serde       = { version = "1.0", features = ["derive"] }
+serde_json  = "1.0"
+
+# === Errors / logging / misc ===
+anyhow      = "1.0"
+thiserror   = "1.0"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy     = "0.15"
+
+# === WASM / browser glue (frontend, Phase 3) ===
+# `getrandom` must be enabled with the `js` feature under wasm.
+wasm-bindgen      = "0.2"
+web-sys           = "0.3"
+js-sys            = "0.3"
+gloo-net          = "0.6"
+leptos            = { version = "0.6", features = ["csr"] }
+getrandom         = { version = "0.2", features = ["js"] }

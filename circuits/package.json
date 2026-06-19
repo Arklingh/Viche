@@ -1,0 +1,26 @@
+{
+  "name": "viche-circuits",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Circom circuits and Groth16 build helpers for the Viche anonymous voting dApp.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "compile": "bash scripts/compile.sh",
+    "proof-demo": "node scripts/gen_proof.js",
+    "export-verifier": "node scripts/export_verifier.js",
+    "clean": "rimraf build ptau node_modules"
+  },
+  "dependencies": {
+    "circomlib": "^2.0.5",
+    "circomlibjs": "^0.1.7",
+    "snarkjs": "^0.7.4",
+    "ffjavascript": "^0.3.0"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

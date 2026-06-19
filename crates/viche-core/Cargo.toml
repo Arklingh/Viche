@@ -1,0 +1,23 @@
+[package]
+name = "viche-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Shared Viche primitives: Poseidon Merkle tree, BN254 field helpers, wire types."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Field arithmetic + Poseidon for the BN254 scalar field.
+# Implementation MUST match circomlib's parameters; see docs/crypto.md.
+# (Pin carried over from the workspace once Phase 2 lands.)
+hex = "0.4"
+
+[lints.rust]
+# Treat the deliberate Phase-2 TODOs as warnings, not errors, so `cargo check`
+# stays green on the scaffold.
+unused = "allow"

@@ -1,0 +1,6 @@
+# Local to circuits/ — also covered by the root .gitignore, kept here so a
+# standalone checkout of just this directory still ignores its own junk.
+build/
+ptau/
+node_modules/
+*.log

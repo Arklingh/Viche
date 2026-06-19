@@ -1,0 +1,28 @@
+[package]
+name = "viche-frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Leptos WASM single-page UI for Viche."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+viche-core = { path = "../viche-core" }
+
+leptos.workspace = true
+wasm-bindgen.workspace = true
+web-sys.workspace = true
+js-sys.workspace = true
+gloo-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+getrandom.workspace = true
+anyhow.workspace = true
+
+[lints.rust]
+unused = "allow"
