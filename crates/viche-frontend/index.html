@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Viche - Anonymous Voting</title>
+
+    <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="z" />
+    <link data-trunk rel="copy-dir" href="public" />
+
+    <!-- Tailwind via CDN. For production, run Tailwind against the markup
+         instead of shipping the runtime JIT, but the CDN is fine for a
+         small-to-medium community dApp and keeps the build pipeline simple. -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              brand: {
+                50: "#f5f3ff",
+                100: "#ede9fe",
+                200: "#ddd6fe",
+                300: "#c4b5fd",
+                400: "#a78bfa",
+                500: "#8b5cf6",
+                600: "#7c3aed",
+                700: "#6d28d9",
+                800: "#5b21b6",
+                900: "#4c1d95",
+              },
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      /* Subtle loading shimmer used while async data is being fetched. */
+      .viche-shimmer {
+        background: linear-gradient(
+          90deg,
+          rgba(255, 255, 255, 0.05) 25%,
+          rgba(255, 255, 255, 0.15) 37%,
+          rgba(255, 255, 255, 0.05) 63%
+        );
+        background-size: 400% 100%;
+        animation: viche-shimmer 1.4s ease infinite;
+      }
+      @keyframes viche-shimmer {
+        0% { background-position: 100% 50%; }
+        100% { background-position: 0 50%; }
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/snarkjs@0.7.4/build/snarkjs.min.js"></script>
+    <script type="module">
+      const cryptoReady = (async () => {
+        const circomlibjs = await import("https://esm.sh/circomlibjs@0.1.7");
+
+        window.__VICHE_POSEIDON__ = await circomlibjs.buildPoseidon();
+        if (!window.snarkjs?.groth16) {
+          throw new Error("snarkjs browser bundle did not expose groth16");
+        }
+        window.__VICHE_CRYPTO_READY__ = true;
+      })().catch((error) => {
+        window.__VICHE_CRYPTO_READY__ = false;
+        window.__VICHE_CRYPTO_ERROR__ = String(error?.message ?? error);
+        console.error("Failed to load Viche crypto libraries", error);
+      });
+
+      window.__VICHE_CRYPTO_PROMISE__ = cryptoReady;
+    </script>
+  </head>
+  <body class="bg-slate-950 text-slate-100 min-h-screen">
+    <!-- Leptos mounts its root component into <body> via mount_to_body. -->
+  </body>
+</html>

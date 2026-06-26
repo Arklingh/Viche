@@ -13,16 +13,27 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 viche-core = { path = "../viche-core" }
+alloy-primitives.workspace = true
 
+# === Leptos CSR framework ===
 leptos.workspace = true
+leptos_meta = { version = "0.6", features = ["csr"] }
+
+# === WASM / browser glue ===
 wasm-bindgen.workspace = true
-web-sys.workspace = true
+wasm-bindgen-futures = "0.4"
+web-sys = { workspace = true, features = ["Window", "Storage", "console"] }
 js-sys.workspace = true
 gloo-net.workspace = true
+gloo-utils = "0.2"
+getrandom.workspace = true
+console_error_panic_hook = "0.1"
+
+# === Serde / JSON ===
 serde.workspace = true
 serde_json.workspace = true
-getrandom.workspace = true
 anyhow.workspace = true
+web-time = "1"
 
 [lints.rust]
 unused = "allow"

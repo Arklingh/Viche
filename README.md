@@ -9,10 +9,10 @@ By leveraging **zero-knowledge proofs**, Viche solves the fundamental paradox
 of electronic voting: verifying that a ballot is valid and comes from an
 eligible voter *without revealing who that voter is*.
 
-> **Status:** Phase 1 complete — Circom circuit, Solidity contracts and the
-> Groth16 build pipeline are implemented and unit-tested. The Rust relayer
-> (Phase 2) and Leptos frontend (Phase 3) are scaffolded as compile-clean
-> stubs. See [Phases](#-phases).
+> **Status:** Phases 1–3 complete — Circom circuit, Solidity contracts, the
+> Groth16 build pipeline, shared Rust primitives (`viche-core`), the gasless
+> Axum/alloy relayer, and the Leptos WASM frontend are implemented.
+> See [Phases](#-phases).
 
 ---
 
@@ -82,6 +82,7 @@ Viche/
 - **Foundry** (`forge`, `cast`, `anvil`) — install via `curl -L https://foundry.paradigm.xyz | bash`
 - **circom** 2.x — <https://docs.circom.io/getting-started/installation/>
 - **snarkjs** — `npm install -g snarkjs`
+- **Trunk** — `cargo install trunk --locked` or `make install-trunk`
 - `make`
 
 ---
@@ -135,18 +136,53 @@ Runs `circuits/scripts/gen_proof.js`, which builds a Poseidon Merkle tree
 from sample commitments, computes the witness, proves it, and verifies the
 proof locally. Useful for end-to-end circuit validation.
 
-### 6. Relayer & frontend (Phases 2 & 3)
+### 6. Run the relayer (Phase 2)
 
-The relayer and frontend crates are scaffolded today. Once implemented:
+The relayer is a complete Axum + alloy service. It needs a funded EOA, an RPC
+endpoint, and the deployed `VotingManager` address:
 
 ```bash
-cp .env.example .env       # fill in RPC_URL, RELAYER_PRIVATE_KEY, contract addresses
-make build-rs              # cargo build --workspace --release
-# relayer:
+cp .env.example .env       # fill in RELAYER_PRIVATE_KEY, RPC_URL, VOTING_MANAGER_ADDRESS
 cargo run --release -p viche-relayer
-# frontend (Phase 3, via Trunk + Tailwind):
-cd crates/viche-frontend && trunk serve
 ```
+
+The server listens on `0.0.0.0:3000` by default and exposes:
+
+```text
+GET  /health                → 200 {"status":"ok"}
+GET  /api/polls             → { "polls": [...] }
+GET  /api/polls/:id         → poll metadata
+GET  /api/polls/:id/tally   → per-option tallies
+POST /api/vote              → { "tx_hash": "0x…", "status": "broadcast" }
+```
+
+Example `POST /api/vote` body (proof is 256 bytes of `abi.encode(pA, pB, pC)`):
+
+```json
+{
+  "poll_id": 1,
+  "vote_option": 2,
+  "nullifier_hash": "0x0123…",
+  "proof": "0x…"
+}
+```
+
+### 7. Run the frontend (Phase 3)
+
+The frontend is a Leptos CSR app built by Trunk. It expects the circuit WASM
+and final zkey under `/circuits/`; `make frontend-assets` copies those from
+`circuits/build`, so run `make circuits` first.
+
+```bash
+rustup target add wasm32-unknown-unknown
+make install-trunk        # one-time, if trunk is not installed
+make frontend-dev         # serves http://127.0.0.1:8080 and proxies /api to :3000
+make frontend             # production bundle in crates/viche-frontend/dist
+```
+
+At runtime the app loads `circomlibjs` and `snarkjs` in the browser, connects
+an injected EIP-1193 wallet, builds the Merkle witness with `viche-core`, and
+posts only `{proof, nullifier, option}` to the relayer.
 
 ---
 
@@ -177,8 +213,8 @@ is tallied in the clear. Encrypted-choice voting (MACI-style) is future work.
 | Phase | Scope                                              | Status |
 |-------|----------------------------------------------------|--------|
 | 1     | Circom circuit, Solidity contracts, build pipeline | ✅ Done |
-| 2     | Rust relayer (`viche-relayer`) + `viche-core`      | ⏳ Scaffolded |
-| 3     | Leptos WASM frontend (`viche-frontend`)            | ⏳ Scaffolded |
+| 2     | Rust relayer (`viche-relayer`) + `viche-core`      | ✅ Done |
+| 3     | Leptos WASM frontend (`viche-frontend`)            | ✅ Done |
 
 ---
 

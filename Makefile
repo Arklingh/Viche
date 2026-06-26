@@ -9,7 +9,7 @@
 #                       OR VotingManager to depend only on the IVerifier iface)
 #   make proof-demo     generate a real Groth16 proof for the sample input
 #
-# Requires: forge, cast, anvil (Foundry), circom, snarkjs, node, cargo, make.
+# Requires: forge, cast, anvil (Foundry), circom, snarkjs, node, cargo, trunk, make.
 # =============================================================================
 .DEFAULT_GOAL := help
 
@@ -18,10 +18,15 @@ CIRCUIT_DEPTH ?= 20
 
 CONTRACTS_DIR := contracts
 CIRCUITS_DIR  := circuits
+FRONTEND_DIR  := crates/viche-frontend
+FRONTEND_PUBLIC_CIRCUITS_DIR := $(FRONTEND_DIR)/public/circuits
+FRONTEND_WASM_ARTIFACT := $(CIRCUITS_DIR)/build/$(CIRCUIT_NAME)_js/$(CIRCUIT_NAME).wasm
+FRONTEND_ZKEY_ARTIFACT := $(CIRCUITS_DIR)/build/$(CIRCUIT_NAME)_final.zkey
 
 .PHONY: help setup install-foundry install-circom install-snarkjs \
         circuits download-ptau verifier build-contracts test-contracts \
-        proof-demo check-rs build-rs test-rs frontend clean clean-circuits
+        proof-demo check-rs build-rs test-rs install-trunk frontend-assets \
+        frontend frontend-dev clean clean-circuits
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -91,11 +96,23 @@ test-rs: ## cargo test --workspace
 	cargo test --workspace
 
 # ---------------------------------------------------------------------------
-# Frontend (Phase 3 — placeholder targets)
+# Frontend
 # ---------------------------------------------------------------------------
-frontend: ## Build the Leptos WASM bundle with Trunk (Phase 3)
-	@echo "Phase 3 target — wire up Trunk + Tailwind when the frontend crate is implemented."
-	cd crates/viche-frontend && trunk build --release
+install-trunk: ## Install the Trunk WASM bundler
+	cargo install trunk --locked
+
+frontend-assets: ## Copy circuit wasm/zkey artifacts into the Trunk public dir
+	@test -f $(FRONTEND_WASM_ARTIFACT) || (echo "Missing $(FRONTEND_WASM_ARTIFACT). Run 'make circuits' first."; exit 1)
+	@test -f $(FRONTEND_ZKEY_ARTIFACT) || (echo "Missing $(FRONTEND_ZKEY_ARTIFACT). Run 'make circuits' first."; exit 1)
+	mkdir -p $(FRONTEND_PUBLIC_CIRCUITS_DIR)
+	cp $(FRONTEND_WASM_ARTIFACT) $(FRONTEND_PUBLIC_CIRCUITS_DIR)/vote.wasm
+	cp $(FRONTEND_ZKEY_ARTIFACT) $(FRONTEND_PUBLIC_CIRCUITS_DIR)/vote_final.zkey
+
+frontend: frontend-assets ## Build the Leptos WASM bundle with Trunk
+	cd $(FRONTEND_DIR) && trunk build --release
+
+frontend-dev: frontend-assets ## Serve the Leptos frontend with Trunk hot reload
+	cd $(FRONTEND_DIR) && trunk serve
 
 # ---------------------------------------------------------------------------
 # Cleanup

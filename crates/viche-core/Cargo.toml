@@ -6,18 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Shared Viche primitives: Poseidon Merkle tree, BN254 field helpers, wire types."
+description = "Shared Viche primitives: BN254 field validation, ZK proof wire types."
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-# Field arithmetic + Poseidon for the BN254 scalar field.
-# Implementation MUST match circomlib's parameters; see docs/crypto.md.
-# (Pin carried over from the workspace once Phase 2 lands.)
-hex = "0.4"
+# BN254 scalar field is exactly 254 bits, so `U256` carries it without
+# overflow. alloy-primitives is WASM-safe (no networking), letting
+# viche-core be reused by the browser frontend in Phase 3.
+alloy-primitives = { workspace = true }
+alloy-sol-types  = { workspace = true }
 
-[lints.rust]
-# Treat the deliberate Phase-2 TODOs as warnings, not errors, so `cargo check`
-# stays green on the scaffold.
-unused = "allow"
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+hex         = "0.4"
+

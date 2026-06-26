@@ -16,9 +16,8 @@
 #                              in-page via snarkjs/wasm, and posts it to the
 #                              relayer.
 #
-# Phase 1 (this commit) only scaffolds the workspace + crates so that
-# `cargo check --workspace` is green. The crate-level `src/lib.rs` files hold
-# documented TODO stubs that point at the phase that will implement them.
+# The workspace now builds the shared primitives, relayer, and browser
+# frontend together so API changes are checked across native and WASM clients.
 # =============================================================================
 [workspace]
 resolver = "2"
@@ -57,6 +56,12 @@ tower-http  = { version = "0.6", features = ["cors", "trace"] }
 # signer/network features it cannot use in the browser.
 alloy       = { version = "0.3", features = ["full"] }
 
+# Primitive type crates, depended on directly by viche-core so the shared
+# crate stays WASM-clean (no provider/network code). alloy 0.3.x is built on
+# alloy-core 0.8.x, so pin the primitives/sol-types to 0.8 for ABI parity.
+alloy-primitives = { version = "0.8", features = ["serde"] }
+alloy-sol-types  = "0.8"
+
 # === Serde / JSON ===
 serde       = { version = "1.0", features = ["derive"] }
 serde_json  = "1.0"
@@ -67,6 +72,7 @@ thiserror   = "1.0"
 tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy     = "0.15"
+url         = "2"
 
 # === WASM / browser glue (frontend, Phase 3) ===
 # `getrandom` must be enabled with the `js` feature under wasm.
