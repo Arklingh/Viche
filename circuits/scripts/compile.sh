@@ -74,7 +74,7 @@ circom "${CIRCUITS_SRC}/${CIRCUIT}.circom" \
     -l "${ROOT_DIR}/node_modules" \
     --r1cs --wasm \
     -o "${BUILD_DIR}" \
-    -c -n  # -c copies inputs, -n forces prime=bn128 explicitly
+    -c # -c copies inputs, -n forces prime=bn128 explicitly
 
 # ---------------------------------------------------------------------------
 # 2. Powers-of-Tau (dev ceremony). Phase-1 (MPC) trusted setup file.

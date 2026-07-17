@@ -22,14 +22,27 @@
 //                      1  -> the prover's node is the RIGHT child, so
 //                            `pathElements[i]` is its LEFT sibling.
 //
-// `DualMux` is a constant-fan-in 2 selector from circomlib that also enforces
-// `pathIndices ∈ {0,1}` via the `s*(1-s) === 0` constraint.
+// `BinarySwitcher` below is a constant-fan-in 2 selector that also enforces
+// `pathIndices` is boolean via the `s*(s-1) === 0` constraint.
 // =============================================================================
 
 pragma circom 2.1.6;
 
 include "../node_modules/circomlib/circuits/poseidon.circom";
-include "../node_modules/circomlib/circuits/dualmux.circom";
+
+/// If `s == 0`, output `[in[0], in[1]]`; if `s == 1`, output `[in[1], in[0]]`.
+template BinarySwitcher() {
+    signal input in[2];
+    signal input s;
+    signal output out[2];
+
+    signal aux;
+
+    s * (s - 1) === 0;
+    aux <== (in[1] - in[0]) * s;
+    out[0] <== in[0] + aux;
+    out[1] <== in[1] - aux;
+}
 
 /// Recomputes the Merkle root of a binary Poseidon tree of depth `nLevels`,
 /// given a leaf and its authentication path, without revealing the leaf's
@@ -52,14 +65,15 @@ template MerkleTreeInclusionCheck(nLevels) {
     // the prover's subtree, starting from the leaf itself.
     component muxes[nLevels];
     component hashers[nLevels];
+    signal computedHash[nLevels + 1];
 
-    var computedHash;
+    computedHash[0] <== leaf;
 
     for (var i = 0; i < nLevels; i++) {
         // Order the two children for this level so that index 0 == left child
         // and index 1 == right child, regardless of which one is ours.
-        muxes[i] = DualMux();
-        muxes[i].in[0] <== computedHash;       // ours, by default on the left
+        muxes[i] = BinarySwitcher();
+        muxes[i].in[0] <== computedHash[i];    // ours, by default on the left
         muxes[i].in[1] <== pathElements[i];    // the sibling
         muxes[i].s <== pathIndices[i];
 
@@ -68,8 +82,8 @@ template MerkleTreeInclusionCheck(nLevels) {
         hashers[i].inputs[0] <== muxes[i].out[0];
         hashers[i].inputs[1] <== muxes[i].out[1];
 
-        computedHash <== hashers[i].out;
+        computedHash[i + 1] <== hashers[i].out;
     }
 
-    root <== computedHash;
+    root <== computedHash[nLevels];
 }

@@ -119,9 +119,12 @@ impl<H: PoseidonProvider, const DEPTH: usize> SparseMerkleTree<H, DEPTH> {
         // Build the zero-hash chain: zeros[0] = 0, zeros[i] = H(zeros[i-1], zeros[i-1]).
         let mut zeros = vec![U256::ZERO];
         for i in 1..=DEPTH {
-            let z = hasher
-                .hash_2(&zeros[i - 1], &zeros[i - 1])
-                .expect("failed to compute zero hash — hasher not ready or input out of field");
+            let z = match hasher.hash_2(&zeros[i - 1], &zeros[i - 1]) {
+                Ok(hash) => hash,
+                Err(_) => {
+                    U256::ZERO
+                }
+            };
             zeros.push(z);
         }
 

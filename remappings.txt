@@ -1,9 +1,2 @@
-# =============================================================================
-# Solidity import remappings (consumed by forge / cast / anvil).
-#
-# After `forge install foundry-rs/forge-std`, the standard libraries live
-# under `contracts/lib/`. These aliases let source files write
-# `import "forge-std/Test.sol";` instead of a relative path.
-# =============================================================================
 forge-std/=contracts/lib/forge-std/src/
 ds-test/=contracts/lib/ds-test/src/

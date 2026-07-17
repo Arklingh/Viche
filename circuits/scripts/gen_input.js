@@ -23,7 +23,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { buildPoseidon } from "circomlibjs";
-import { mod, Field } from "ffjavascript";
+import { F1Field } from "ffjavascript";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");

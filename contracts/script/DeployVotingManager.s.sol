@@ -6,6 +6,8 @@ import {Script} from "forge-std/Script.sol";
 import {VotingManager} from "../src/VotingManager.sol";
 import {Groth16Verifier} from "../src/verifier/Groth16Verifier.sol";
 
+import {console2} from "forge-std/console2.sol";
+
 /// @title DeployVotingManager
 /// @notice Forge deployment script. Two-stage:
 ///

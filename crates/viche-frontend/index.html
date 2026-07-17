@@ -52,19 +52,35 @@
       }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/snarkjs@0.7.4/build/snarkjs.min.js"></script>
+    
     <script type="module">
       const cryptoReady = (async () => {
-        const circomlibjs = await import("https://esm.sh/circomlibjs@0.1.7");
+        // Load the ESM bundle of circomlibjs cleanly
+        const { buildPoseidon } = await import("https://cdn.jsdelivr.net/npm/circomlibjs@0.1.7/+esm");
+        
+        console.log("Compiling Poseidon WebAssembly...");
+        const poseidonInstance = await buildPoseidon();
+        
+        // Expose poseidon globally in all common namespaces
+        window.__VICHE_POSEIDON__ = poseidonInstance;
+        window.poseidon = poseidonInstance;
+        
+        // This makes sure any window.poseidon(...) call maps correctly to our compiled instance
+        if (typeof window.poseidon !== 'function') {
+          // If poseidon is an object with a hash function, bind it
+          window.poseidon = poseidonInstance.hash || poseidonInstance;
+        }
 
-        window.__VICHE_POSEIDON__ = await circomlibjs.buildPoseidon();
         if (!window.snarkjs?.groth16) {
           throw new Error("snarkjs browser bundle did not expose groth16");
         }
+        
         window.__VICHE_CRYPTO_READY__ = true;
+        console.log("Viche Cryptographic Engine initialized successfully!");
       })().catch((error) => {
         window.__VICHE_CRYPTO_READY__ = false;
         window.__VICHE_CRYPTO_ERROR__ = String(error?.message ?? error);
-        console.error("Failed to load Viche crypto libraries", error);
+        console.error("Failed to load Viche crypto libraries:", error);
       });
 
       window.__VICHE_CRYPTO_PROMISE__ = cryptoReady;

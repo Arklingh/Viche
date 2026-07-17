@@ -6,7 +6,7 @@
 //! resulting signal updates.
 
 use alloy_primitives::{Bytes, U256};
-use leptos::{spawn_local, SignalGet, SignalSet, SignalUpdate};
+use leptos::{spawn_local, SignalGet, SignalSet, SignalUpdate, SignalGetUntracked};
 use viche_core::wire::{NullifierHash, Proof, VoteRequest};
 
 use crate::api::ApiClient;
@@ -65,7 +65,7 @@ pub fn connect_wallet(signals: AppSignals) {
 
 /// Fetch the poll list once on mount, if not already loaded.
 pub fn fetch_polls_on_mount(signals: AppSignals) {
-    if signals.polls.get().is_some() {
+    if signals.polls.get_untracked().is_some() {
         return;
     }
     refresh_polls(signals);
@@ -101,7 +101,7 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
 
     spawn_local(async move {
         // 1. Resolve the voter's secret (per-account, in localStorage).
-        let wallet_addr: String = match signals.wallet.get().address.clone() {
+        let wallet_addr: String = match signals.wallet.get_untracked().address.clone() {
             Some(a) => a,
             None => {
                 signals.vote_failed("Connect your wallet first.");
@@ -218,6 +218,19 @@ fn build_witness(
     use viche_core::merkle::{SparseMerkleTree, DEFAULT_DEPTH};
     use viche_core::poseidon::PoseidonProvider;
 
+    let window = web_sys::window()
+        .ok_or_else(|| anyhow::anyhow!("No browser window context found"))?;
+    
+    let js_val = js_sys::Reflect::get(&window, &"__VICHE_CRYPTO_READY__".into())
+        .map_err(|_| anyhow::anyhow!("Failed to search window variables"))?;
+
+    // Verify the flag is set and evaluates to true
+    if js_val.is_undefined() || js_val.is_null() || !js_val.as_bool().unwrap_or(false) {
+        return Err(anyhow::anyhow!(
+            "Web3 Cryptographic engine is loading. Please wait 3 seconds and click vote again."
+        ));
+    }
+    
     let poseidon = crate::crypto::CircomlibPoseidon::new()
         .map_err(|e| anyhow::anyhow!("Crypto engine not ready: {:?}", e))?;
 

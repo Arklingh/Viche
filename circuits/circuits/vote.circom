@@ -101,4 +101,4 @@ template Vote(MERKLE_TREE_DEPTH) {
 // Viche default: depth-20 tree (up to ~1M voters). Compile-time parameter;
 // changing it requires regenerating the trusted setup (the zkey) and the
 // verifier contract.
-component main {public: [voteId, merkleRoot, nullifierHash]} = Vote(20);
+component main {public [voteId, merkleRoot, nullifierHash]} = Vote(20);

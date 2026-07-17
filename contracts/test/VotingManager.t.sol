@@ -13,6 +13,13 @@ import {MockVerifier} from "./mocks/MockVerifier.sol";
 ///         the invalid-proof path. The pairing math itself is delegated to
 ///         `MockVerifier`, so these tests are fast and hermetic.
 contract VotingManagerTest is Test {
+    // Local event declarations for expectEmit. Solidity 0.8.20 does not
+    // support `ContractName.EventName` references, so we re-declare the
+    // events here; matching is done by selector (identical signatures).
+    event PollCreated(uint256 indexed pollId, bytes32 indexed merkleRoot, uint256 deadline, uint256 numOptions, string metadataUri);
+    event PollClosed(uint256 indexed pollId);
+    event VoteCast(uint256 indexed pollId, bytes32 indexed nullifierHash, uint256 voteOption);
+
     VotingManager internal voting;
     MockVerifier internal mockVerifier;
 
@@ -67,7 +74,7 @@ contract VotingManagerTest is Test {
     // =========================================================================
     function test_CreatePoll_EmitsAndStores() public {
         vm.expectEmit(true, true, false, true);
-        emit IVotingManager.PollCreated(POLL_ID, ROOT, block.timestamp + 1 days, NUM_OPTIONS, "ipfs://poll1");
+        emit PollCreated(POLL_ID, ROOT, block.timestamp + 1 days, NUM_OPTIONS, "ipfs://poll1");
         uint256 id = voting.createPoll(ROOT, NUM_OPTIONS, block.timestamp + 1 days, "ipfs://poll1");
         assertEq(id, POLL_ID);
         assertEq(voting.nextPollId(), POLL_ID + 1);
@@ -104,7 +111,7 @@ contract VotingManagerTest is Test {
         _createPoll();
 
         vm.expectEmit(true, true, false, true);
-        emit IVotingManager.VoteCast(POLL_ID, NULLIFIER, OPTION);
+        emit VoteCast(POLL_ID, NULLIFIER, OPTION);
         voting.castVote(POLL_ID, _dummyProof(), NULLIFIER, OPTION);
 
         assertTrue(voting.hasVoted(POLL_ID, NULLIFIER));
@@ -190,7 +197,7 @@ contract VotingManagerTest is Test {
     function test_ClosePoll_Emits() public {
         _createPoll();
         vm.expectEmit(true, false, false, true);
-        emit IVotingManager.PollClosed(POLL_ID);
+        emit PollClosed(POLL_ID);
         voting.closePoll(POLL_ID);
         (, , , , bool active) = voting.getPoll(POLL_ID);
         assertFalse(active);

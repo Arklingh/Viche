@@ -37,7 +37,7 @@ help: ## Show this help.
 # ---------------------------------------------------------------------------
 setup: ## One-time: install forge-std, npm deps, download ptau
 	@echo ">> Installing forge-std into $(CONTRACTS_DIR)/lib"
-	cd $(CONTRACTS_DIR) && forge install foundry-rs/forge-std --no-commit
+	cd $(CONTRACTS_DIR) && forge install foundry-rs/forge-std
 	@echo ">> Installing JS deps (circomlib, snarkjs, circomlibjs)"
 	cd $(CIRCUITS_DIR) && npm ci
 	@echo ">> Downloading Powers-of-Tau ceremony file (dev only)"
@@ -57,23 +57,40 @@ install-snarkjs: ## Install snarkjs globally
 # ---------------------------------------------------------------------------
 # ZK circuit pipeline (Phase 1)
 # ---------------------------------------------------------------------------
-download-ptau: ## Fetch powersOfTau28_hez_final_<depth>.ptau (dev ceremony)
-	@mkdir -p $(CIRCUITS_DIR)/ptau
-	@if [ ! -f $(CIRCUITS_DIR)/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau ]; then \
-	    echo ">> Downloading ptau (depth $(CIRCUIT_DEPTH)) — this is large, please wait"; \
-	    curl -L https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau \
-	        -o $(CIRCUITS_DIR)/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau; \
-	else echo ">> ptau already present, skipping"; fi
+# download-ptau: ## Fetch powersOfTau28_hez_final_<depth>.ptau (dev ceremony)
+# 	@mkdir -p $(CIRCUITS_DIR)/ptau
+# 	@if [ ! -f $(CIRCUITS_DIR)/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau ]; then \
+# 	    echo ">> Downloading ptau (depth $(CIRCUIT_DEPTH)) — this is large, please wait"; \
+# 	    curl -L https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau \
+# 	        -o $(CIRCUITS_DIR)/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau; \
+# 	else echo ">> ptau already present, skipping"; fi
 
-circuits: download-ptau ## Compile circuit -> r1cs/wasm/zkey + Groth16Verifier.sol
-	cd $(CIRCUITS_DIR) && CIRCUIT=$(CIRCUIT_NAME) MERKLE_TREE_DEPTH=$(CIRCUIT_DEPTH) ./scripts/compile.sh
+download-ptau: ## Fetch powersOfTau28_hez_final_<depth>.ptau (dev ceremony)
+	@if not exist "$(CIRCUITS_DIR)\ptau" mkdir "$(CIRCUITS_DIR)\ptau"
+	@if not exist "$(CIRCUITS_DIR)\ptau\powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau" ( \
+		echo "Downloading ptau depth $(CIRCUIT_DEPTH) - this is large, please wait" && \
+		curl -L https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau -o "$(CIRCUITS_DIR)\ptau\powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau" \
+	) else ( \
+		echo "ptau already present, skipping" \
+	)
+
+circuits:
+	@echo "ptau already present, skipping"
+	cd circuits && "C:\Program Files\Git\bin\bash.exe" -c "CIRCUIT=vote MERKLE_TREE_DEPTH=20 ./scripts/compile.sh"
 
 verifier: ## Re-export just the Solidity verifier from the final zkey
-	cd $(CIRCUITS_DIR) && CIRCUIT=$(CIRCUIT_NAME) node scripts/export_verifier.js
+	cd $(CIRCUITS_DIR) && npx cross-env CIRCUIT=$(CIRCUIT_NAME) node scripts/export_verifier.js
 
-proof-demo: ## Generate a real Groth16 proof for the sample circuit input
-	cd $(CIRCUITS_DIR) && CIRCUIT=$(CIRCUIT_NAME) node scripts/gen_proof.js
+# verifier: ## Re-export just the Solidity verifier from the final zkey
+#	npx snarkjs zkey export solidityverifier $(CIRCUITS_DIR)/build/$(CIRCUIT_NAME)_final.zkey $(CONTRACTS_DIR)/src/Groth16Verifier.sol
 
+proof-demo:
+# 1. Generate the input.json (runs gen_input.js if missing)
+	cd $(CIRCUITS_DIR) && npx cross-env CIRCUIT=$(CIRCUIT_NAME) node scripts/gen_input.js
+# 2. Calculate the witness
+	npx snarkjs wtns calculate $(CIRCUITS_DIR)/build/$(CIRCUIT_NAME)_js/$(CIRCUIT_NAME).wasm $(CIRCUITS_DIR)/build/input.json $(CIRCUITS_DIR)/build/witness.wtns
+# 3. Generate the proof
+	cd $(CIRCUITS_DIR) && npx cross-env CIRCUIT=$(CIRCUIT_NAME) node scripts/gen_proof.js
 # ---------------------------------------------------------------------------
 # Smart contracts (Phase 1)
 # ---------------------------------------------------------------------------
@@ -102,11 +119,15 @@ install-trunk: ## Install the Trunk WASM bundler
 	cargo install trunk --locked
 
 frontend-assets: ## Copy circuit wasm/zkey artifacts into the Trunk public dir
-	@test -f $(FRONTEND_WASM_ARTIFACT) || (echo "Missing $(FRONTEND_WASM_ARTIFACT). Run 'make circuits' first."; exit 1)
-	@test -f $(FRONTEND_ZKEY_ARTIFACT) || (echo "Missing $(FRONTEND_ZKEY_ARTIFACT). Run 'make circuits' first."; exit 1)
-	mkdir -p $(FRONTEND_PUBLIC_CIRCUITS_DIR)
-	cp $(FRONTEND_WASM_ARTIFACT) $(FRONTEND_PUBLIC_CIRCUITS_DIR)/vote.wasm
-	cp $(FRONTEND_ZKEY_ARTIFACT) $(FRONTEND_PUBLIC_CIRCUITS_DIR)/vote_final.zkey
+	@if not exist "$(FRONTEND_WASM_ARTIFACT)" ( \
+		echo Missing $(FRONTEND_WASM_ARTIFACT). Run 'make circuits' first. && exit 1 \
+	)
+	@if not exist "$(FRONTEND_ZKEY_ARTIFACT)" ( \
+		echo Missing $(FRONTEND_ZKEY_ARTIFACT). Run 'make circuits' first. && exit 1 \
+	)
+	@if not exist "$(FRONTEND_PUBLIC_CIRCUITS_DIR)" mkdir "$(FRONTEND_PUBLIC_CIRCUITS_DIR)"
+	copy /Y $(subst /,\,$(FRONTEND_WASM_ARTIFACT)) $(subst /,\,$(FRONTEND_PUBLIC_CIRCUITS_DIR))\vote.wasm
+	copy /Y $(subst /,\,$(FRONTEND_ZKEY_ARTIFACT)) $(subst /,\,$(FRONTEND_PUBLIC_CIRCUITS_DIR))\vote_final.zkey
 
 frontend: frontend-assets ## Build the Leptos WASM bundle with Trunk
 	cd $(FRONTEND_DIR) && trunk build --release
