@@ -7,8 +7,8 @@
 
     
 <script type="module">
-import init, * as bindings from '/viche-frontend-a86055c935ed8be4.js';
-const wasm = await init({ module_or_path: '/viche-frontend-a86055c935ed8be4_bg.wasm' });
+import init, * as bindings from '/viche-frontend-b241ea2aff3142c8.js';
+const wasm = await init({ module_or_path: '/viche-frontend-b241ea2aff3142c8_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -63,6 +63,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/snarkjs@0.7.4/build/snarkjs.min.js"></script>
+    <script src="asset_cache.js"></script>
     
     <script type="module">
       const cryptoReady = (async () => {
@@ -96,7 +97,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
       window.__VICHE_CRYPTO_PROMISE__ = cryptoReady;
     </script>
-  <link rel="modulepreload" href="/viche-frontend-a86055c935ed8be4.js" crossorigin="anonymous" integrity="sha384-KOfRFfRv3ZMoRhj06Bt8NG1wyEss2d5nj3Dg4fK+mWi3i5cN/VkSSQlAKZPg6r0M"><link rel="preload" href="/viche-frontend-a86055c935ed8be4_bg.wasm" crossorigin="anonymous" integrity="sha384-SuLaN4ocekwEca3tL/5R08c3HiO824Csa9jY35GYEFkAmpxBdAt1VzozwbF4IiK8" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/viche-frontend-b241ea2aff3142c8.js" crossorigin="anonymous" integrity="sha384-KOfRFfRv3ZMoRhj06Bt8NG1wyEss2d5nj3Dg4fK+mWi3i5cN/VkSSQlAKZPg6r0M"><link rel="preload" href="/viche-frontend-b241ea2aff3142c8_bg.wasm" crossorigin="anonymous" integrity="sha384-Yii6hG9PUivRK0w4i9nIaThSBe5bRBMoCWnFT6mnRkgqfm9uh0mUhxbP1oTePjzv" as="fetch" type="application/wasm"></head>
   <body class="bg-slate-950 text-slate-100 min-h-screen">
     <!-- Leptos mounts its root component into <body> via mount_to_body. -->
   <script>"use strict";

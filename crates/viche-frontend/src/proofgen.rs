@@ -97,8 +97,11 @@ impl ProofGenerator {
             .dyn_into()
             .map_err(|_| anyhow!("snarkjs.groth16.fullProve is not a function"))?;
 
-        let wasm_url = wasm_bindgen::JsValue::from_str(&self.circuit_wasm_url);
-        let zkey_url = wasm_bindgen::JsValue::from_str(&self.zkey_url);
+        let wasm_url_str = get_cached_asset_url(&self.circuit_wasm_url).await;
+        let zkey_url_str = get_cached_asset_url(&self.zkey_url).await;
+
+        let wasm_url = wasm_bindgen::JsValue::from_str(&wasm_url_str);
+        let zkey_url = wasm_bindgen::JsValue::from_str(&zkey_url_str);
         let promise_value = full_prove
             .call3(&snarkjs_groth16, &input, &wasm_url, &zkey_url)
             .map_err(js_err)?;
@@ -137,6 +140,27 @@ fn snarkjs_groth16() -> Option<wasm_bindgen::JsValue> {
         return None;
     }
     Some(groth16)
+}
+
+/// Resolve asset URL through the Cache Storage API helper `window.__VICHE_GET_CACHED_ASSET`
+/// if present; fall back to the original URL string.
+async fn get_cached_asset_url(url: &str) -> String {
+    let global = js_sys::global();
+    if let Ok(func) = js_sys::Reflect::get(&global, &"__VICHE_GET_CACHED_ASSET".into()) {
+        if let Ok(f) = func.dyn_into::<Function>() {
+            let arg = wasm_bindgen::JsValue::from_str(url);
+            if let Ok(promise_val) = f.call1(&global, &arg) {
+                if let Ok(promise) = promise_val.dyn_into::<Promise>() {
+                    if let Ok(res) = JsFuture::from(promise).await {
+                        if let Some(s) = res.as_string() {
+                            return s;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    url.to_string()
 }
 
 /// Build the circom witness input object from a [`VoteWitness`].
@@ -263,3 +287,55 @@ fn push_u256(out: &mut Vec<u8>, v: &U256) {
 fn js_err(e: wasm_bindgen::JsValue) -> anyhow::Error {
     anyhow!("JS error: {:?}", e)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    #[wasm_bindgen_test]
+    fn test_wasm_witness_serialization() {
+        let witness = VoteWitness {
+            secret: U256::from(42u64),
+            path_elements: vec![U256::from(10u64)],
+            path_indices: vec![false],
+            vote_id: U256::from(1u64),
+            merkle_root: U256::from(100u64),
+            nullifier_hash: U256::from(200u64),
+        };
+        let js_obj = build_witness_object(&witness).unwrap();
+        assert!(js_sys::Reflect::has(&js_obj, &"secret".into()).unwrap());
+        assert!(js_sys::Reflect::has(&js_obj, &"voteId".into()).unwrap());
+        assert!(js_sys::Reflect::has(&js_obj, &"merkleRoot".into()).unwrap());
+        assert!(js_sys::Reflect::has(&js_obj, &"nullifierHash".into()).unwrap());
+    }
+
+    #[test]
+    fn test_push_u256_endianness_and_length() {
+        let mut out = Vec::new();
+        let val = U256::from(0x12345678u64);
+        push_u256(&mut out, &val);
+
+        assert_eq!(out.len(), 32);
+        // Big endian: lowest bytes are at the end
+        assert_eq!(out[28..32], [0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(&out[0..28], &[0u8; 28]);
+    }
+
+    #[test]
+    fn test_vote_witness_instantiation() {
+        let witness = VoteWitness {
+            secret: U256::from(100u64),
+            path_elements: vec![U256::from(1u64), U256::from(2u64)],
+            path_indices: vec![false, true],
+            vote_id: U256::from(1u64),
+            merkle_root: U256::from(999u64),
+            nullifier_hash: U256::from(888u64),
+        };
+
+        assert_eq!(witness.secret, U256::from(100u64));
+        assert_eq!(witness.path_elements.len(), 2);
+        assert_eq!(witness.path_indices, vec![false, true]);
+    }
+}
+
