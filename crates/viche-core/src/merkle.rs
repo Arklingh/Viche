@@ -350,4 +350,21 @@ mod tests {
         let proof = tree.proof(0);
         assert_eq!(proof.depth(), 20);
     }
+
+    #[test]
+    fn merkle_proof_mismatched_lengths_panics() {
+        let result = std::panic::catch_unwind(|| {
+            MerkleProof::new(vec![U256::from(1u64)], vec![false, true]);
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zero_depth_tree_panics() {
+        let result = std::panic::catch_unwind(|| {
+            SparseMerkleTree::<MockPoseidon, 0>::new(&MockPoseidon);
+        });
+        assert!(result.is_err());
+    }
 }
+

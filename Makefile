@@ -100,6 +100,26 @@ build-contracts: ## forge build
 test-contracts: ## forge test -vvv
 	forge test -vvv
 
+deploy-contracts: ## Deploy VotingManager contract to local Anvil node
+	cd $(CONTRACTS_DIR) && forge script script/DeployVotingManager.s.sol \
+		--rpc-url http://127.0.0.1:8545 \
+		--broadcast \
+		--private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+
+seed-poll: ## Seed initial community verification poll (requires ADDR=<contract_address>)
+	@if [ -z "$(ADDR)" ]; then \
+		echo "❌ Error: Please specify the deployed contract address. Example: make seed-poll ADDR=0x5FbDB2315678afecb367f032d93F642f64180aa3"; \
+		exit 1; \
+	fi
+	cast send "$(ADDR)" \
+		"createPoll(bytes32,uint256,uint256,string)" \
+		0x0000000000000000000000000000000000000000000000000000000000000000 \
+		3 \
+		1999999999 \
+		"ipfs://mock-uri" \
+		--rpc-url http://127.0.0.1:8545 \
+		--private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+
 # ---------------------------------------------------------------------------
 # Rust workspace (Phase 2/3 stubs today)
 # ---------------------------------------------------------------------------
