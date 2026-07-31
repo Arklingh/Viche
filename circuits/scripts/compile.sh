@@ -100,7 +100,7 @@ snarkjs groth16 setup "${R1CS}" "${PTAU_FILE}" "${PHASE2_ZKEY}"
 #    mixed with randomness so reruns differ.
 # ---------------------------------------------------------------------------
 echo ">> [4/6] contribute beacon -> final zkey"
-BEacon_ENTROPY="viche-dev-beacon-$(date +%s)-${RANDOM}"
+BEacon_ENTROPY="${BEACON_ENTROPY:-0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}"
 snarkjs zkey contribute "${PHASE2_ZKEY}" "${FINAL_ZKEY}" \
     --name="Viche dev contribution" \
     -e="${BEacon_ENTROPY}" -v
