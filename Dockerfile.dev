@@ -1,0 +1,44 @@
+# Dockerfile.dev — Containerized local development environment for Viche
+FROM rust:1.80-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.foundry/bin:${PATH}"
+
+# Install system dependencies & Node.js 20 LTS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    jq \
+    ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install global npm tools: snarkjs
+RUN npm install -g snarkjs
+
+# Install Rust targets and WASM tools: wasm32 target, wasm-pack, prebuilt trunk binary
+RUN rustup target add wasm32-unknown-unknown \
+    && curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh \
+    && curl -sSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf - -C /usr/local/bin
+
+# Install Circom 2.2.3 binary
+RUN curl -sSL -o /usr/local/bin/circom https://github.com/iden3/circom/releases/download/v2.2.3/circom-linux-amd64 \
+    && chmod +x /usr/local/bin/circom
+
+# Install Foundry (anvil, forge, cast)
+RUN curl -sSL https://foundry.paradigm.xyz | bash \
+    && /root/.foundry/bin/foundryup
+
+WORKDIR /app
+
+# Expose standard ports:
+# 8545: Anvil local Ethereum testnet node
+# 3000: Viche Axum relayer
+# 8080: Trunk frontend dev server
+EXPOSE 8545 3000 8080
+
+CMD ["bash"]

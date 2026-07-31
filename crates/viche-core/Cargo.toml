@@ -1,0 +1,25 @@
+[package]
+name = "viche-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Shared Viche primitives: BN254 field validation, ZK proof wire types."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# BN254 scalar field is exactly 254 bits, so `U256` carries it without
+# overflow. alloy-primitives is WASM-safe (no networking), letting
+# viche-core be reused by the browser frontend in Phase 3.
+alloy-primitives = { workspace = true }
+alloy-sol-types  = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+hex         = "0.4"
+

@@ -1,0 +1,2 @@
+forge-std/=contracts/lib/forge-std/src/
+ds-test/=contracts/lib/ds-test/src/

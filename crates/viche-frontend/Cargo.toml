@@ -1,0 +1,45 @@
+[package]
+name = "viche-frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Leptos WASM single-page UI for Viche."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+viche-core = { path = "../viche-core" }
+alloy-primitives.workspace = true
+
+# === Leptos CSR framework ===
+leptos.workspace = true
+leptos_meta = { version = "0.6", features = ["csr"] }
+
+# === WASM / browser glue ===
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+web-sys = { workspace = true, features = ["Window", "Storage", "console"] }
+js-sys.workspace = true
+gloo-net.workspace = true
+gloo-utils = "0.2"
+getrandom.workspace = true
+console_error_panic_hook = "0.1"
+
+# === Serde / JSON ===
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+web-time = "1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--enable-bulk-memory"]
+
+[lints.rust]
+unused = "allow"

@@ -1,0 +1,29 @@
+# Trunk build configuration for the Viche frontend.
+#
+# Trunk drives the `wasm32-unknown-unknown` build, wires up wasm-bindgen,
+# runs wasm-opt, and serves the SPA with live-reload in `trunk serve`.
+#
+# Requires the `wasm32-unknown-unknown` target:
+#   rustup target add wasm32-unknown-unknown
+#
+# Usage:
+#   trunk serve              # dev server with hot reload (http://127.0.0.1:8080)
+#   trunk build --release    # production bundle in dist/
+
+[build]
+target = "index.html"
+dist = "dist"
+# Release builds run wasm-opt to shrink + speed up the bundle.
+release_opt_level = "z"
+
+[serve]
+address = "127.0.0.1"
+port = 8080
+open = false
+
+# Proxy /api/* to the relayer during local development so the browser can hit
+# the relayer without CORS gymnastics. In production the relayer is exposed on
+# its own origin (or behind a reverse proxy with the right CORS headers).
+[[proxy]]
+rewrite = "/api/"
+backend = "http://127.0.0.1:3000/api/"

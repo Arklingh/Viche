@@ -1,0 +1,37 @@
+# =============================================================================
+# Foundry configuration for the Viche smart-contract layer.
+#
+# This file configures `forge build`, `forge test` and friends for the project
+# living in `./contracts`. Viche is a Solidity project *plus* a Rust workspace
+# living side-by-side at the repo root, so we explicitly point Foundry at the
+# `contracts/` sub-tree via `[default] src/out/libs`.
+#
+# Notable flags:
+#   - solc 0.8.20      : matches the `pragma` in every contract. 0.8.20 ships
+#                        the PUSH0 opcode and is well-supported across L2s.
+#   - via_ir = true    : the snarkjs-generated Groth16 verifier is a single
+#                        ~600-line function with deep expression nesting; the
+#                        Yul pipeline compiles it reliably where the legacy
+#                        AST-based compiler would hit "stack too deep".
+#   - optimizer 200    : verification hot path (BN254 precompiles) benefits
+#                        from optimization; 200 runs is a sensible default.
+#   - evm_version paris: PUSH0-aware, available on every chain Viche targets.
+# =============================================================================
+[profile.default]
+src            = "contracts/src"
+out            = "contracts/out"
+libs           = ["contracts/lib"]
+test           = "contracts/test"
+script         = "contracts/script"
+solc_version   = "0.8.20"
+evm_version    = "paris"
+optimizer      = true
+optimizer_runs = 200
+via_ir         = true
+auto_detect_solc = false
+verbosity      = 3
+
+# The `match` contract filter makes `forge test` run only the regular test
+# files (those ending in `.t.sol`), skipping any helper / base contracts.
+[profile.default.fuzz]
+runs = 256

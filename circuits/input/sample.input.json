@@ -1,0 +1,15 @@
+{
+  "_comment": "Static sample witness input for the Viche vote circuit. gen_input.js generates a real input.json under build/ at runtime; this file documents the schema and is used by the README/docs.",
+  "secret": "<bigint string in [0, BN254 scalar field)>",
+  "pathElements": [
+    "<sibling hash at level 0>",
+    "<sibling hash at level 1>"
+  ],
+  "pathIndices": [
+    "0 or 1 at level 0 (0 = our node is left child)",
+    "0 or 1 at level 1"
+  ],
+  "voteId": "<the on-chain pollId, reduced into the BN254 scalar field>",
+  "merkleRoot": "<root of the Poseidon Merkle tree of identity commitments>",
+  "nullifierHash": "Poseidon(secret, voteId)"
+}

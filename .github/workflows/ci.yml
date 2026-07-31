@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  circuits:
+    name: Circom Circuits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install SnarkJS & Dependencies
+        run: |
+          npm install -g snarkjs
+          cd circuits && npm install
+
+      - name: Install Circom
+        run: |
+          curl -sSL -o /usr/local/bin/circom https://github.com/iden3/circom/releases/download/v2.2.3/circom-linux-amd64
+          chmod +x /usr/local/bin/circom
+          circom --version
+
+      - name: Compile Circuit
+        run: |
+          cd circuits
+          ./scripts/compile.sh
+
+      - name: Run Circuit Tests
+        run: |
+          cd circuits
+          npm test
+
+      - name: Upload Circuit Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: circuit-artifacts
+          path: |
+            circuits/build/vote_js/vote.wasm
+            circuits/build/vote_final.zkey
+            circuits/build/vkey.json
+
+  contracts:
+    name: Solidity Contracts
+    runs-on: ubuntu-latest
+    needs: circuits
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Download Circuit Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: circuit-artifacts
+          path: circuits/build
+
+      - name: Copy Generated Verifier Contract
+        run: |
+          mkdir -p contracts/src/verifier
+          npx snarkjs zkey export solidityverifier circuits/build/vote_final.zkey contracts/src/verifier/Groth16Verifier.sol
+
+      - name: Compile Contracts
+        run: |
+          cd contracts
+          forge build
+
+      - name: Run Contract Tests
+        run: |
+          cd contracts
+          forge test -vvv
+
+  relayer:
+    name: Rust Relayer Service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Relayer Service
+        run: cargo check -p viche-relayer
+
+      - name: Run Relayer Unit Tests
+        run: cargo test -p viche-relayer
+
+  frontend:
+    name: WASM & Rust Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Run Cargo Workspace Tests
+        run: cargo test --workspace
+
+      - name: Build WASM Frontend Release
+        run: wasm-pack build --release crates/viche-frontend
+
+      - name: Run WASM Frontend Tests
+        run: wasm-pack test --node crates/viche-frontend
