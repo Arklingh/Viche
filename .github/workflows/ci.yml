@@ -32,6 +32,7 @@ jobs:
       - name: Compile Circuit
         run: |
           cd circuits
+          chmod +x ./scripts/compile.sh
           ./scripts/compile.sh
 
       - name: Run Circuit Tests
