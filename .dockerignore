@@ -1,0 +1,11 @@
+target/
+**/target/
+node_modules/
+**/node_modules/
+.git/
+.cargo/
+circuits/build/
+dist/
+crates/viche-frontend/dist/
+crates/viche-frontend/pkg/
+*.log
