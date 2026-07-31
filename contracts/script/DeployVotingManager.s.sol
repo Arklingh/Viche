@@ -41,6 +41,8 @@ contract DeployVotingManager is Script {
 
         voting = new VotingManager(verifierAddr);
 
+        require(address(voting.verifier()) == verifierAddr, "Verifier address mismatch");
+
         vm.stopBroadcast();
 
         // Forge picks up script-formatted logs for downstream tooling.
