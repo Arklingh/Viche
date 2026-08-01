@@ -119,12 +119,19 @@ echo ">> [6/6] export Solidity verifier -> ${CONTRACTS_VERIFIER_DIR}/Groth16Veri
 snarkjs zkey export solidityverifier "${FINAL_ZKEY}" \
     "${CONTRACTS_VERIFIER_DIR}/Groth16Verifier.sol"
 
+# ---------------------------------------------------------------------------
+# 7. Generate matching proof and public signal test vectors.
+# ---------------------------------------------------------------------------
+echo ">> [7/7] generate test proof vectors -> ${BUILD_DIR}/test_proof.json"
+node "${SCRIPT_DIR}/gen_proof.js"
+
 echo "=================================================================="
 echo " Done. Outputs:"
 echo "   ${R1CS}"
 echo "   ${WASM_DIR}"
 echo "   ${FINAL_ZKEY}"
 echo "   ${VKEY}"
+echo "   ${BUILD_DIR}/test_proof.json"
 echo "   ${CONTRACTS_VERIFIER_DIR}/Groth16Verifier.sol"
 echo "=================================================================="
 echo " Next: from the repo root, \`make build-contracts\` then \`make test-contracts\`."

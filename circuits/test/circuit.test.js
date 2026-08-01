@@ -1,4 +1,4 @@
-import { test, after } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -77,10 +77,6 @@ class MerkleTree {
 }
 
 test("Viche Groth16 Circuit Test Suite", async (t) => {
-    after(() => {
-        process.exit(0);
-    });
-    
     const poseidon = await buildPoseidon();
     const F = poseidon.F;
     const poseidon1 = (x) => F.toObject(poseidon([x]));
