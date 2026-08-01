@@ -33,7 +33,7 @@ jobs:
         run: |
           cd circuits
           chmod +x ./scripts/compile.sh
-          ./scripts/compile.sh
+          bash ./scripts/compile.sh
 
       - name: Run Circuit Tests
         run: |
@@ -48,6 +48,7 @@ jobs:
             circuits/build/vote_js/vote.wasm
             circuits/build/vote_final.zkey
             circuits/build/vkey.json
+            circuits/build/test_proof.json
 
   contracts:
     name: Solidity Contracts

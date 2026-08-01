@@ -30,6 +30,7 @@ optimizer_runs = 200
 via_ir         = true
 auto_detect_solc = false
 verbosity      = 3
+fs_permissions = [{ access = "read", path = "./" }]
 
 # The `match` contract filter makes `forge test` run only the regular test
 # files (those ending in `.t.sol`), skipping any helper / base contracts.

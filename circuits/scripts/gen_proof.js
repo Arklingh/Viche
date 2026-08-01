@@ -77,13 +77,30 @@ async function main() {
     if (!ok) await fail("Proof FAILED local verification — circuit build is broken.");
     console.log(">> proof verified OK");
 
-    // 3. Emit a Solidity-ready payload so a developer can paste the values
-    //    straight into a Foundry test or a curl call to the relayer.
+    // 3. Emit a Solidity-ready payload so Foundry integration tests and relayers
+    //    can import matching proof vectors dynamically.
+    const TEST_PROOF = path.join(BUILD, "test_proof.json");
+    const formattedTestProof = {
+        pA: [proof.pi_a[0], proof.pi_a[1]],
+        pB: [
+            [proof.pi_b[0][1], proof.pi_b[0][0]],
+            [proof.pi_b[1][1], proof.pi_b[0][0] === proof.pi_b[1][0] ? proof.pi_b[1][0] : proof.pi_b[1][0]]
+        ],
+        pC: [proof.pi_c[0], proof.pi_c[1]],
+        voteId: publicSignals[0],
+        merkleRoot: publicSignals[1],
+        nullifierHash: publicSignals[2]
+    };
+    // Ensure pB[1] uses Y.c1 and Y.c0
+    formattedTestProof.pB[1] = [proof.pi_b[1][1], proof.pi_b[1][0]];
+
+    await writeFile(TEST_PROOF, JSON.stringify(formattedTestProof, null, 2));
+
     console.log("\n=== public signals (order: voteId, merkleRoot, nullifierHash) ===");
     console.log(publicSignals);
     console.log("\n=== proof ===");
     console.log(JSON.stringify(proof, null, 2));
-    console.log(`\nWrote ${PROOF} and ${PUBLIC}`);
+    console.log(`\nWrote ${PROOF}, ${PUBLIC}, and ${TEST_PROOF}`);
 }
 
 main().catch((e) => {
