@@ -52,6 +52,26 @@ pub fn expected_chain_id_hex() -> String {
     option_env!("VICHE_CHAIN_ID").unwrap_or("0x1").to_string()
 }
 
+/// The deployed `VotingManager` contract address, for admin transactions sent
+/// directly from the connected wallet (createPoll/closePoll bypass the
+/// relayer entirely — see [`crate::onchain`]).
+///
+/// Priority: `window.__VICHE_VOTING_MANAGER_ADDRESS__`, then the compile-time
+/// `VICHE_VOTING_MANAGER_ADDRESS` env var. `None` if neither is set.
+pub fn voting_manager_address() -> Option<String> {
+    if let Some(addr) = global_string("__VICHE_VOTING_MANAGER_ADDRESS__") {
+        let trimmed = addr.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+
+    option_env!("VICHE_VOTING_MANAGER_ADDRESS")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn global_string(key: &str) -> Option<String> {
     let value = js_sys::Reflect::get(&js_sys::global(), &key.into()).ok()?;
     if value.is_undefined() || value.is_null() {

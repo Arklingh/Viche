@@ -3,17 +3,22 @@
 use leptos::*;
 use web_sys::MouseEvent;
 
-use crate::state::AppSignals;
+use crate::state::{AppSignals, View};
 
 /// The app header.
 #[component]
 pub fn Header(#[prop(into)] signals: AppSignals) -> impl IntoView {
     let wallet = signals.wallet;
+    let is_admin = signals.is_admin;
+    let view_signal = signals.view;
 
     view! {
         <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-10">
             <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-                <div class="flex items-center gap-2">
+                <button
+                    class="flex items-center gap-2"
+                    on:click=move |_| view_signal.set(View::List)
+                >
                     <span class="text-2xl" aria-hidden="true">"\u{1F5F3}\u{FE0F}"</span>
                     <h1 class="text-xl font-semibold tracking-tight">
                         <span class="text-brand-400">"Vi"</span>"che"
@@ -21,9 +26,18 @@ pub fn Header(#[prop(into)] signals: AppSignals) -> impl IntoView {
                     <span class="ml-2 text-xs text-slate-500 hidden sm:inline">
                         "anonymous voting"
                     </span>
-                </div>
+                </button>
 
                 <div class="flex items-center gap-3">
+                    {move || is_admin.get().then(|| view! {
+                        <button
+                            class="text-sm px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"
+                            on:click=move |_| view_signal.set(View::Admin)
+                        >
+                            "Admin"
+                        </button>
+                    })}
+
                     {move || {
                         let w = wallet.get();
                         if w.connecting {
@@ -69,6 +83,7 @@ pub fn Header(#[prop(into)] signals: AppSignals) -> impl IntoView {
 #[component]
 fn ConnectButton(#[prop(into)] signals: AppSignals) -> impl IntoView {
     let wallet = signals.wallet;
+    let is_admin = signals.is_admin;
 
     view! {
         {move || {
@@ -83,6 +98,7 @@ fn ConnectButton(#[prop(into)] signals: AppSignals) -> impl IntoView {
                                 w.address = None;
                                 w.error = None;
                             });
+                            is_admin.set(false);
                         }
                     >
                         "Disconnect"

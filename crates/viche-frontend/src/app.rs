@@ -2,7 +2,7 @@
 
 use leptos::*;
 
-use crate::components::{Header, PollDetail, PollList};
+use crate::components::{AdminPage, Header, PollDetail, PollList};
 use crate::state::{AppSignals, View};
 
 /// The application root. Mounted once into `<body>` from [`crate::lib_main`].
@@ -22,6 +22,9 @@ pub fn App() -> impl IntoView {
                     View::List => view! { <PollList signals=signals.clone() /> }.into_view(),
                     View::Detail(id) => view! {
                         <PollDetail signals=signals.clone() poll_id=id />
+                    }.into_view(),
+                    View::Admin => view! {
+                        <AdminPage signals=signals.clone() />
                     }.into_view(),
                 }}
             </main>

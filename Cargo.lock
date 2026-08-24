@@ -4437,6 +4437,7 @@ name = "viche-frontend"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "anyhow",
  "console_error_panic_hook",
  "getrandom 0.2.17",

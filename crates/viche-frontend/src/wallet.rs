@@ -94,6 +94,59 @@ impl Wallet {
         Ok(s.into())
     }
 
+    /// `eth_call` — a read-only contract call, returning the raw ABI-encoded
+    /// response bytes.
+    pub async fn eth_call(&self, to: &str, data: &[u8]) -> Result<Vec<u8>> {
+        let call_obj = js_sys::Object::new();
+        js_sys::Reflect::set(&call_obj, &"to".into(), &to.into())
+            .map_err(|_| anyhow!("failed to build eth_call params"))?;
+        js_sys::Reflect::set(
+            &call_obj,
+            &"data".into(),
+            &alloy_primitives::hex::encode_prefixed(data).into(),
+        )
+        .map_err(|_| anyhow!("failed to build eth_call params"))?;
+
+        let result = self
+            .call("eth_call", &[call_obj.into(), "latest".into()])
+            .await
+            .map_err(|e| anyhow!("eth_call failed: {:?}", e))?;
+
+        let s: JsString = result
+            .dyn_into()
+            .map_err(|_| anyhow!("eth_call returned a non-string result"))?;
+        let s: String = s.into();
+        alloy_primitives::hex::decode(s.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("eth_call returned invalid hex: {}", e))
+    }
+
+    /// `eth_sendTransaction` — sign and broadcast a transaction from the
+    /// connected account. Returns the transaction hash once the wallet
+    /// accepts it (does not wait for confirmation).
+    pub async fn send_transaction(&self, from: &str, to: &str, data: &[u8]) -> Result<String> {
+        let tx_obj = js_sys::Object::new();
+        js_sys::Reflect::set(&tx_obj, &"from".into(), &from.into())
+            .map_err(|_| anyhow!("failed to build transaction params"))?;
+        js_sys::Reflect::set(&tx_obj, &"to".into(), &to.into())
+            .map_err(|_| anyhow!("failed to build transaction params"))?;
+        js_sys::Reflect::set(
+            &tx_obj,
+            &"data".into(),
+            &alloy_primitives::hex::encode_prefixed(data).into(),
+        )
+        .map_err(|_| anyhow!("failed to build transaction params"))?;
+
+        let result = self
+            .call("eth_sendTransaction", &[tx_obj.into()])
+            .await
+            .map_err(|e| anyhow!("wallet rejected transaction: {:?}", e))?;
+
+        let s: JsString = result
+            .dyn_into()
+            .map_err(|_| anyhow!("eth_sendTransaction returned a non-string result"))?;
+        Ok(s.into())
+    }
+
     /// Register a JS callback for `accountsChanged`.
     pub fn on_accounts_changed<F>(&self, f: F) -> ClosureHandle
     where
