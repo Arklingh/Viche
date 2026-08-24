@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 viche-core = { path = "../viche-core" }
 alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
 
 # === Leptos CSR framework ===
 leptos.workspace = true

@@ -11,7 +11,7 @@ use viche_core::wire::{NullifierHash, Proof, VoteRequest};
 
 use crate::api::ApiClient;
 use crate::config::relayer_url;
-use crate::state::{AppSignals, VotePhase};
+use crate::state::{AdminTxPhase, AppSignals, VotePhase};
 
 /// Connect (or re-query) the injected wallet.
 pub fn connect_wallet(signals: AppSignals) {
@@ -43,6 +43,7 @@ pub fn connect_wallet(signals: AppSignals) {
                 .on_accounts_changed(move |accts| {
                     let new_addr: Option<String> = accts.into_iter().next();
                     s.wallet.update(|w| w.address = new_addr);
+                    check_admin(s.clone());
                 })
                 .leak();
         }
@@ -56,9 +57,186 @@ pub fn connect_wallet(signals: AppSignals) {
         }
 
         match (address, chain_id) {
-            (Some(addr), Some(cid)) => signals.wallet_connected(addr, cid),
-            (Some(addr), None) => signals.wallet_connected(addr, String::new()),
+            (Some(addr), Some(cid)) => {
+                signals.wallet_connected(addr, cid);
+                check_admin(signals);
+            }
+            (Some(addr), None) => {
+                signals.wallet_connected(addr, String::new());
+                check_admin(signals);
+            }
             _ => signals.wallet_error("Wallet returned no accounts."),
+        }
+    });
+}
+
+/// Check whether the connected wallet is the on-chain `VotingManager` owner,
+/// and update `signals.is_admin` accordingly. A missing wallet, missing
+/// contract address, or any RPC error is treated as "not admin" — the admin
+/// page itself is purely a UX gate, so failing closed here just hides it.
+pub fn check_admin(signals: AppSignals) {
+    let address = match signals.wallet.get_untracked().address.clone() {
+        Some(a) => a,
+        None => {
+            signals.is_admin.set(false);
+            return;
+        }
+    };
+    let contract = match crate::config::voting_manager_address() {
+        Some(c) => c,
+        None => {
+            signals.is_admin.set(false);
+            return;
+        }
+    };
+
+    spawn_local(async move {
+        let wallet = match crate::wallet::detect() {
+            Some(w) => w,
+            None => {
+                signals.is_admin.set(false);
+                return;
+            }
+        };
+
+        let data = crate::onchain::encode_owner();
+        let is_admin = match wallet.eth_call(&contract, &data).await {
+            Ok(resp) => crate::onchain::decode_owner(&resp)
+                .map(|owner| owner.eq_ignore_ascii_case(&address))
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        signals.is_admin.set(is_admin);
+    });
+}
+
+/// Submit a `createPoll` transaction directly from the connected wallet.
+///
+/// `createPoll`/`closePoll` are `onlyOwner` on-chain, so unlike voting there
+/// is no relayer/proof pipeline here: the admin's own wallet signs and pays
+/// gas, and the contract itself rejects the call if the sender isn't the
+/// owner.
+pub fn submit_create_poll(
+    signals: AppSignals,
+    merkle_root_input: String,
+    num_options_input: String,
+    deadline_input: String,
+    metadata_uri: String,
+) {
+    let tx_signal = signals.admin_create;
+    crate::state::set_admin_tx_phase(tx_signal, AdminTxPhase::Submitting);
+
+    spawn_local(async move {
+        let from = match signals.wallet.get_untracked().address.clone() {
+            Some(a) => a,
+            None => {
+                crate::state::admin_tx_failed(tx_signal, "Connect your wallet first.");
+                return;
+            }
+        };
+        let contract = match crate::config::voting_manager_address() {
+            Some(c) => c,
+            None => {
+                crate::state::admin_tx_failed(
+                    tx_signal,
+                    "Voting manager contract address is not configured.",
+                );
+                return;
+            }
+        };
+        let wallet = match crate::wallet::detect() {
+            Some(w) => w,
+            None => {
+                crate::state::admin_tx_failed(tx_signal, "No EIP-1193 wallet found.");
+                return;
+            }
+        };
+
+        let root = match crate::onchain::parse_bytes32(&merkle_root_input) {
+            Ok(r) => r,
+            Err(e) => {
+                crate::state::admin_tx_failed(tx_signal, format!("Invalid merkle root: {}", e));
+                return;
+            }
+        };
+        let num_options: u64 = match num_options_input.trim().parse() {
+            Ok(n) if n >= 2 => n,
+            _ => {
+                crate::state::admin_tx_failed(
+                    tx_signal,
+                    "Number of options must be an integer >= 2.",
+                );
+                return;
+            }
+        };
+        let deadline = match crate::onchain::parse_datetime_local_unix(&deadline_input) {
+            Some(d) => d,
+            None => {
+                crate::state::admin_tx_failed(tx_signal, "Invalid voting deadline.");
+                return;
+            }
+        };
+
+        let data = crate::onchain::encode_create_poll(root, num_options, deadline, &metadata_uri);
+        match wallet.send_transaction(&from, &contract, &data).await {
+            Ok(tx_hash) => {
+                crate::state::admin_tx_done(tx_signal, tx_hash);
+                refresh_polls(signals);
+            }
+            Err(e) => {
+                crate::state::admin_tx_failed(tx_signal, format!("Transaction failed: {}", e))
+            }
+        }
+    });
+}
+
+/// Submit a `closePoll` transaction directly from the connected wallet.
+pub fn submit_close_poll(signals: AppSignals, poll_id: String) {
+    let tx_signal = signals.admin_close;
+    crate::state::set_admin_tx_phase(tx_signal, AdminTxPhase::Submitting);
+
+    spawn_local(async move {
+        let from = match signals.wallet.get_untracked().address.clone() {
+            Some(a) => a,
+            None => {
+                crate::state::admin_tx_failed(tx_signal, "Connect your wallet first.");
+                return;
+            }
+        };
+        let contract = match crate::config::voting_manager_address() {
+            Some(c) => c,
+            None => {
+                crate::state::admin_tx_failed(
+                    tx_signal,
+                    "Voting manager contract address is not configured.",
+                );
+                return;
+            }
+        };
+        let wallet = match crate::wallet::detect() {
+            Some(w) => w,
+            None => {
+                crate::state::admin_tx_failed(tx_signal, "No EIP-1193 wallet found.");
+                return;
+            }
+        };
+        let pid: u64 = match poll_id.trim().parse() {
+            Ok(p) => p,
+            Err(_) => {
+                crate::state::admin_tx_failed(tx_signal, "Invalid poll id.");
+                return;
+            }
+        };
+
+        let data = crate::onchain::encode_close_poll(pid);
+        match wallet.send_transaction(&from, &contract, &data).await {
+            Ok(tx_hash) => {
+                crate::state::admin_tx_done(tx_signal, tx_hash);
+                refresh_polls(signals);
+            }
+            Err(e) => {
+                crate::state::admin_tx_failed(tx_signal, format!("Transaction failed: {}", e))
+            }
         }
     });
 }
