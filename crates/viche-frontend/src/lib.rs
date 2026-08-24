@@ -31,6 +31,7 @@
 //! - [`api`] — relayer HTTP client (gloo-net).
 //! - [`wallet`] — EIP-1193 bridge.
 //! - [`crypto`] — circomlibjs Poseidon provider.
+//! - [`onchain`] — admin calldata encoding for direct wallet transactions.
 //! - [`proofgen`] — snarkjs proof generation.
 //! - [`components`] — Leptos view components.
 //! - [`config`] — runtime URL configuration.
@@ -45,6 +46,7 @@ pub mod components;
 pub mod config;
 pub mod crypto;
 pub mod js_helpers;
+pub mod onchain;
 pub mod proofgen;
 pub mod state;
 pub mod wallet;

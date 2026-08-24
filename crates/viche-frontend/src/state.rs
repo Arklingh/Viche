@@ -58,6 +58,59 @@ pub struct VoteState {
 }
 
 // =========================================================================
+// Admin (create / close poll) lifecycle
+// =========================================================================
+
+/// Where an admin transaction (create/close poll) is in its lifecycle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AdminTxPhase {
+    /// Idle — no transaction in progress.
+    #[default]
+    Idle,
+    /// Awaiting wallet signature + broadcast.
+    Submitting,
+    /// Wallet accepted and broadcast the transaction.
+    Done,
+    /// Failed at some step.
+    Failed,
+}
+
+/// The state of an in-flight (or just-finished) admin transaction.
+#[derive(Debug, Clone, Default)]
+pub struct AdminTxState {
+    /// Current phase.
+    pub phase: AdminTxPhase,
+    /// Human-readable status / error message.
+    pub message: Option<String>,
+    /// The broadcast transaction hash once available.
+    pub tx_hash: Option<String>,
+}
+
+/// Move an admin-tx signal to a new phase, clearing any prior message.
+pub fn set_admin_tx_phase(signal: RwSignal<AdminTxState>, phase: AdminTxPhase) {
+    signal.update(|s| {
+        s.phase = phase;
+        s.message = None;
+    });
+}
+
+/// Record an admin-tx failure.
+pub fn admin_tx_failed(signal: RwSignal<AdminTxState>, msg: impl Into<String>) {
+    signal.update(|s| {
+        s.phase = AdminTxPhase::Failed;
+        s.message = Some(msg.into());
+    });
+}
+
+/// Record a successful admin-tx broadcast.
+pub fn admin_tx_done(signal: RwSignal<AdminTxState>, tx_hash: String) {
+    signal.update(|s| {
+        s.phase = AdminTxPhase::Done;
+        s.tx_hash = Some(tx_hash);
+    });
+}
+
+// =========================================================================
 // Page navigation
 // =========================================================================
 
@@ -68,6 +121,8 @@ pub enum View {
     List,
     /// A single poll detail + vote form.
     Detail(String),
+    /// Poll administration (create / close), owner-only.
+    Admin,
 }
 
 impl Default for View {
@@ -98,6 +153,12 @@ pub struct AppSignals {
     pub view: RwSignal<View>,
     /// The voter's secret, keyed to the connected account in localStorage.
     pub secret: RwSignal<Option<String>>,
+    /// Whether the connected wallet is the on-chain `VotingManager` owner.
+    pub is_admin: RwSignal<bool>,
+    /// State of an in-flight "create poll" transaction.
+    pub admin_create: RwSignal<AdminTxState>,
+    /// State of an in-flight "close poll" transaction.
+    pub admin_close: RwSignal<AdminTxState>,
 }
 
 impl AppSignals {
@@ -111,6 +172,9 @@ impl AppSignals {
             vote: RwSignal::new(VoteState::default()),
             view: RwSignal::new(View::List),
             secret: RwSignal::new(None),
+            is_admin: RwSignal::new(false),
+            admin_create: RwSignal::new(AdminTxState::default()),
+            admin_close: RwSignal::new(AdminTxState::default()),
         }
     }
 
