@@ -25,6 +25,13 @@ use alloy::sol;
 ///   * `castVoteCall::send(&self)` — broadcast the transaction.
 ///   * `IVotingManager`   — the contract wrapper struct.
 ///   * `IVotingManager::castVote(...)` — method on the contract instance.
+///   * `IVotingManager::IVotingManagerErrors` — an aggregate enum over every
+///     `error` declared below (one variant per error), implementing
+///     `SolInterface` so a revert's raw data can be decoded back into a
+///     specific typed error — see [`crate::relay::submit_vote`]'s
+///     pre-simulation step, which decodes against this instead of hand-typed
+///     4-byte selectors (error-prone; a typo fails silently at runtime, not
+///     at compile time like everything else in this file).
 ///
 /// Type mapping (alloy 0.8 sol-types):
 ///   * `uint256`       → `U256`
@@ -33,6 +40,20 @@ use alloy::sol;
 sol! {
     #[sol(rpc)]
     interface IVotingManager {
+        // ---- errors (VotingManager.sol's custom errors, verbatim) --------
+        // Declared here (not just in the .sol source) purely so `sol!`
+        // generates `IVotingManagerErrors` for decoding revert data — see
+        // the module doc comment above.
+        error Unauthorized();
+        error PollDoesNotExist(uint256 pollId);
+        error PollNotActive(uint256 pollId);
+        error PollEnded(uint256 pollId);
+        error InvalidVoteOption(uint256 voteOption);
+        error AlreadyVoted(bytes32 nullifierHash);
+        error InvalidProof();
+        error InvalidDeadline();
+        error InvalidNumOptions();
+
         /// @notice Create a new poll. Reverts (`Unauthorized`) if the caller
         ///         isn't `VotingManager.owner` — see [`crate::relay::submit_create_poll`].
         /// @param merkleRoot  Root of the Poseidon Merkle tree of identity
