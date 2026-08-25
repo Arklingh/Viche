@@ -5,7 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Viche - Anonymous Voting</title>
 
-    <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="z" />
+    <!-- data-wasm-opt-params: current rustc emits bulk-memory ops and
+         saturating float-to-int casts by default on wasm32 (both stable
+         features); wasm-opt rejects them unless explicitly allowed, even
+         though it only needs to pass them through unchanged. Without this,
+         `trunk build --release` fails wasm-opt validation. -->
+    <link
+      data-trunk
+      rel="rust"
+      href="Cargo.toml"
+      data-wasm-opt="z"
+      data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int"
+    />
     <link data-trunk rel="copy-dir" href="public" />
 
     <!-- Tailwind via CDN. For production, run Tailwind against the markup

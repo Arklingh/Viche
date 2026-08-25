@@ -40,7 +40,13 @@ web-time = "1"
 wasm-bindgen-test = "0.3"
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "--enable-bulk-memory"]
+# Current rustc emits `i64.trunc_sat_f64_u`-style saturating float-to-int
+# casts by default on wasm32 (stable since ~1.75) -- wasm-opt rejects that
+# instruction unless told it's allowed, even though it only needs to pass
+# it through unchanged. Without --enable-nontrapping-float-to-int here,
+# `wasm-pack build --release` fails validation on any `as` cast from a
+# float, e.g. `(millis / 1000.0) as u64` in onchain.rs.
+wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
 
 [lints.rust]
 unused = "allow"
