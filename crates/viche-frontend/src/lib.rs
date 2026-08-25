@@ -49,6 +49,8 @@ pub mod js_helpers;
 pub mod onchain;
 pub mod proofgen;
 pub mod state;
+#[cfg(test)]
+mod test_support;
 pub mod wallet;
 
 /// WASM entry point. Called by `trunk`/`wasm-bindgen` once the `.wasm` module

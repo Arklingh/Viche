@@ -233,3 +233,195 @@ impl ClosureHandle {
         self.0.forget();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{install_mock_ethereum, lock_global_mocks, remove_mock_ethereum};
+    use wasm_bindgen_test::*;
+
+    // `run_in_browser` is declared once, crate-wide, in `test_support`.
+    //
+    // Every test here holds the `lock_global_mocks` guard for its whole
+    // body: wasm-bindgen-test interleaves `async fn` tests cooperatively
+    // rather than running them one at a time, and `window.ethereum` is a
+    // process-wide global, so two interleaved tests installing different
+    // mocks would otherwise stomp on each other. See test_support.rs.
+
+    #[wasm_bindgen_test]
+    async fn detect_returns_none_without_a_provider() {
+        let _guard = lock_global_mocks().await;
+        remove_mock_ethereum();
+        assert!(detect().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    async fn detect_returns_some_with_a_provider() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum("return Promise.resolve([]);", true);
+        assert!(detect().is_some());
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn is_meta_mask_reflects_the_provider_flag() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum("return Promise.resolve([]);", true);
+        assert!(detect().unwrap().is_meta_mask());
+
+        install_mock_ethereum("return Promise.resolve([]);", false);
+        assert!(!detect().unwrap().is_meta_mask());
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn request_accounts_returns_addresses() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            r#"if (method === "eth_requestAccounts") { return Promise.resolve(["0xabc123"]); }
+               return Promise.reject(new Error("unexpected method: " + method));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let accounts = wallet.request_accounts().await.unwrap();
+        assert_eq!(accounts, vec!["0xabc123".to_string()]);
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn request_accounts_surfaces_wallet_rejection() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            r#"return Promise.reject(new Error("user rejected"));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let err = wallet.request_accounts().await.unwrap_err();
+        assert!(err.to_string().contains("wallet rejected connection"));
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn accounts_returns_already_authorised_addresses() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            r#"if (method === "eth_accounts") { return Promise.resolve(["0xdef456", "0x111"]); }
+               return Promise.reject(new Error("unexpected"));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let accounts = wallet.accounts().await.unwrap();
+        assert_eq!(accounts, vec!["0xdef456".to_string(), "0x111".to_string()]);
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn accounts_returns_empty_when_none_authorised() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(r#"return Promise.resolve([]);"#, true);
+        let wallet = detect().unwrap();
+        let accounts = wallet.accounts().await.unwrap();
+        assert!(accounts.is_empty());
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn chain_id_returns_hex_string() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(r#"return Promise.resolve("0x7a69");"#, true);
+        let wallet = detect().unwrap();
+        assert_eq!(wallet.chain_id().await.unwrap(), "0x7a69");
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn eth_call_sends_to_and_data_and_decodes_hex_response() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            r#"if (method === "eth_call") {
+                 if (params[0].to !== "0xCONTRACT" || params[0].data !== "0xdeadbeef") {
+                   return Promise.reject(new Error("bad params: " + JSON.stringify(params)));
+                 }
+                 return Promise.resolve("0x0102030a");
+               }
+               return Promise.reject(new Error("unexpected method"));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let resp = wallet
+            .eth_call("0xCONTRACT", &[0xde, 0xad, 0xbe, 0xef])
+            .await
+            .unwrap();
+        assert_eq!(resp, vec![0x01, 0x02, 0x03, 0x0a]);
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn eth_call_rejects_non_hex_response() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(r#"return Promise.resolve("not-hex");"#, true);
+        let wallet = detect().unwrap();
+        let err = wallet.eth_call("0xCONTRACT", &[0x01]).await.unwrap_err();
+        assert!(err.to_string().contains("invalid hex"));
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn eth_call_rejects_non_string_response() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(r#"return Promise.resolve(42);"#, true);
+        let wallet = detect().unwrap();
+        let err = wallet.eth_call("0xCONTRACT", &[0x01]).await.unwrap_err();
+        assert!(err.to_string().contains("non-string"));
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn send_transaction_sends_from_to_data_and_returns_hash() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            r#"if (method === "eth_sendTransaction") {
+                 const tx = params[0];
+                 if (tx.from !== "0xFROM" || tx.to !== "0xTO" || tx.data !== "0xcafe") {
+                   return Promise.reject(new Error("bad tx: " + JSON.stringify(tx)));
+                 }
+                 return Promise.resolve("0xTXHASH");
+               }
+               return Promise.reject(new Error("unexpected method"));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let hash = wallet
+            .send_transaction("0xFROM", "0xTO", &[0xca, 0xfe])
+            .await
+            .unwrap();
+        assert_eq!(hash, "0xTXHASH");
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn send_transaction_surfaces_wallet_rejection() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            r#"return Promise.reject(new Error("user denied transaction signature"));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let err = wallet
+            .send_transaction("0xFROM", "0xTO", &[0x01])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("wallet rejected transaction"));
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn on_accounts_changed_does_not_panic_without_a_real_listener_api() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(r#"return Promise.resolve([]);"#, true);
+        let wallet = detect().unwrap();
+        let handle = wallet.on_accounts_changed(|_accounts| {});
+        handle.leak();
+        remove_mock_ethereum();
+    }
+}

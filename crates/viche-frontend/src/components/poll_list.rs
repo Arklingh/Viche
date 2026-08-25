@@ -130,3 +130,20 @@ fn shorten_hex(s: &str) -> String {
     }
     format!("{}...{}", &s[..8], &s[len - 4..])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shorten_hex_leaves_short_strings_untouched() {
+        assert_eq!(shorten_hex("0xabcd"), "0xabcd");
+        assert_eq!(shorten_hex("0x1234abcd"), "0x1234abcd"); // exactly 12 chars
+    }
+
+    #[test]
+    fn shorten_hex_truncates_long_roots() {
+        let root = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab";
+        assert_eq!(shorten_hex(root), "0x123456...90ab");
+    }
+}

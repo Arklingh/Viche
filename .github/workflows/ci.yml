@@ -120,5 +120,10 @@ jobs:
       - name: Build WASM Frontend Release
         run: wasm-pack build --release crates/viche-frontend
 
+      # `test_support.rs` declares `wasm_bindgen_test_configure!(run_in_browser)`
+      # crate-wide (several tests mock `window.ethereum` / mount components
+      # into a real DOM), so the whole suite needs a browser, not Node.
+      # ubuntu-latest ships Chrome preinstalled; wasm-pack fetches a matching
+      # chromedriver automatically.
       - name: Run WASM Frontend Tests
-        run: wasm-pack test --node crates/viche-frontend
+        run: wasm-pack test --headless --chrome crates/viche-frontend

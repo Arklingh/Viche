@@ -131,3 +131,26 @@ fn shorten(addr: &str) -> String {
     }
     format!("{}...{}", &addr[..6], &addr[len - 4..])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shorten_leaves_short_addresses_untouched() {
+        assert_eq!(shorten("0x1234"), "0x1234");
+        assert_eq!(shorten("0x12345678"), "0x12345678"); // exactly 10 chars
+    }
+
+    #[test]
+    fn shorten_truncates_long_addresses() {
+        let addr = "0x1234567890abcdef1234567890abcdef12345678";
+        assert_eq!(shorten(addr), "0x1234...5678");
+    }
+
+    #[test]
+    fn shorten_handles_the_boundary_at_eleven_chars() {
+        // 11 chars is the first length that gets truncated.
+        assert_eq!(shorten("0x123456789"), "0x1234...6789");
+    }
+}

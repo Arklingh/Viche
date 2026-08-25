@@ -210,3 +210,95 @@ fn AdminTxFeedback(
         }}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::next_tick;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_test::*;
+
+    /// Mount `<AdminPage>` into a fresh, detached `<div>` (never attached to
+    /// the visible document) and return it so the test can read back
+    /// rendered text. Leptos updates this element reactively as `signals`
+    /// change, same as it would for a real mount.
+    fn mount(signals: AppSignals) -> web_sys::HtmlElement {
+        let document = web_sys::window().unwrap().document().unwrap();
+        let container = document
+            .create_element("div")
+            .unwrap()
+            .dyn_into::<web_sys::HtmlElement>()
+            .unwrap();
+
+        let mount_signals = signals.clone();
+        leptos::mount_to(container.clone(), move || {
+            view! { <AdminPage signals=mount_signals.clone() /> }
+        });
+        container
+    }
+
+    #[wasm_bindgen_test]
+    async fn shows_connect_prompt_when_wallet_is_disconnected() {
+        let signals = AppSignals::new();
+        let container = mount(signals);
+        next_tick().await;
+
+        let text = container.text_content().unwrap_or_default();
+        assert!(
+            text.contains("Connect the poll-admin wallet"),
+            "unexpected content: {text}"
+        );
+        assert!(!text.contains("Create Poll"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn shows_not_administrator_message_for_a_connected_non_owner() {
+        let signals = AppSignals::new();
+        signals.wallet_connected("0xSomeone".to_string(), "0x1".to_string());
+        // is_admin defaults to false.
+        let container = mount(signals);
+        next_tick().await;
+
+        let text = container.text_content().unwrap_or_default();
+        assert!(
+            text.contains("not the poll administrator"),
+            "unexpected content: {text}"
+        );
+        assert!(!text.contains("Create Poll"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn shows_create_and_manage_sections_for_the_owner_wallet() {
+        let signals = AppSignals::new();
+        signals.wallet_connected("0xOwner".to_string(), "0x1".to_string());
+        signals.is_admin.set(true);
+        let container = mount(signals);
+        next_tick().await;
+
+        let text = container.text_content().unwrap_or_default();
+        assert!(text.contains("Create Poll"), "unexpected content: {text}");
+        assert!(text.contains("Manage Polls"), "unexpected content: {text}");
+        assert!(!text.contains("not the poll administrator"));
+        assert!(!text.contains("Connect the poll-admin wallet"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn gate_reacts_when_is_admin_flips_after_mount() {
+        let signals = AppSignals::new();
+        signals.wallet_connected("0xOwner".to_string(), "0x1".to_string());
+        // Mount while still not (yet) confirmed as admin.
+        let container = mount(signals.clone());
+        next_tick().await;
+        assert!(container
+            .text_content()
+            .unwrap_or_default()
+            .contains("not the poll administrator"));
+
+        // check_admin (or a direct set, as here) resolving later should
+        // reactively flip the gate without remounting.
+        signals.is_admin.set(true);
+        next_tick().await;
+        let text = container.text_content().unwrap_or_default();
+        assert!(text.contains("Create Poll"), "unexpected content: {text}");
+    }
+}

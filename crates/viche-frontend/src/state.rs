@@ -239,3 +239,161 @@ impl Default for AppSignals {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leptos::SignalGetUntracked;
+
+    #[test]
+    fn default_view_is_list() {
+        assert_eq!(View::default(), View::List);
+    }
+
+    #[test]
+    fn new_signals_start_idle_and_disconnected() {
+        let signals = AppSignals::new();
+        assert!(signals.wallet.get_untracked().address.is_none());
+        assert!(!signals.wallet.get_untracked().connecting);
+        assert_eq!(signals.vote.get_untracked().phase, VotePhase::Idle);
+        assert_eq!(signals.view.get_untracked(), View::List);
+        assert!(signals.polls.get_untracked().is_none());
+        assert!(!signals.is_admin.get_untracked());
+        assert_eq!(signals.admin_create.get_untracked().phase, AdminTxPhase::Idle);
+        assert_eq!(signals.admin_close.get_untracked().phase, AdminTxPhase::Idle);
+    }
+
+    #[test]
+    fn default_impl_matches_new() {
+        let signals = AppSignals::default();
+        assert!(signals.wallet.get_untracked().address.is_none());
+        assert_eq!(signals.view.get_untracked(), View::List);
+    }
+
+    #[test]
+    fn wallet_connecting_clears_prior_error() {
+        let signals = AppSignals::new();
+        signals.wallet_error("boom");
+        assert_eq!(signals.wallet.get_untracked().error.as_deref(), Some("boom"));
+
+        signals.wallet_connecting();
+        let w = signals.wallet.get_untracked();
+        assert!(w.connecting);
+        assert!(w.error.is_none());
+    }
+
+    #[test]
+    fn wallet_connected_sets_address_chain_and_clears_flags() {
+        let signals = AppSignals::new();
+        signals.wallet_connecting();
+        signals.wallet_connected("0xabc".into(), "0x1".into());
+
+        let w = signals.wallet.get_untracked();
+        assert_eq!(w.address.as_deref(), Some("0xabc"));
+        assert_eq!(w.chain_id.as_deref(), Some("0x1"));
+        assert!(!w.connecting);
+        assert!(w.error.is_none());
+    }
+
+    #[test]
+    fn wallet_error_stops_connecting_and_preserves_address() {
+        let signals = AppSignals::new();
+        signals.wallet_connected("0xabc".into(), "0x1".into());
+        signals.wallet_connecting();
+        signals.wallet_error("wallet rejected connection");
+
+        let w = signals.wallet.get_untracked();
+        assert!(!w.connecting);
+        assert_eq!(w.error.as_deref(), Some("wallet rejected connection"));
+        // Disconnecting is a separate, explicit action; an error mid-reconnect
+        // should not silently drop the previously-known address.
+        assert_eq!(w.address.as_deref(), Some("0xabc"));
+    }
+
+    #[test]
+    fn vote_phase_transitions_clear_message() {
+        let signals = AppSignals::new();
+        signals.vote_failed("nope");
+        assert!(signals.vote.get_untracked().message.is_some());
+
+        signals.vote_phase(VotePhase::Witness);
+        let v = signals.vote.get_untracked();
+        assert_eq!(v.phase, VotePhase::Witness);
+        assert!(v.message.is_none());
+    }
+
+    #[test]
+    fn vote_failed_sets_phase_and_message() {
+        let signals = AppSignals::new();
+        signals.vote_failed("proof generation failed");
+        let v = signals.vote.get_untracked();
+        assert_eq!(v.phase, VotePhase::Failed);
+        assert_eq!(v.message.as_deref(), Some("proof generation failed"));
+    }
+
+    #[test]
+    fn vote_done_sets_phase_and_tx_hash() {
+        let signals = AppSignals::new();
+        signals.vote_done(VoteResponse {
+            tx_hash: "0xdead".into(),
+            status: viche_core::wire::VoteStatus::Broadcast,
+        });
+        let v = signals.vote.get_untracked();
+        assert_eq!(v.phase, VotePhase::Done);
+        assert_eq!(v.tx_hash.as_deref(), Some("0xdead"));
+    }
+
+    #[test]
+    fn vote_reset_returns_to_default_state() {
+        let signals = AppSignals::new();
+        signals.vote_failed("nope");
+        signals.vote_reset();
+        let v = signals.vote.get_untracked();
+        assert_eq!(v.phase, VotePhase::Idle);
+        assert!(v.message.is_none());
+        assert!(v.tx_hash.is_none());
+    }
+
+    #[test]
+    fn set_admin_tx_phase_clears_message_but_keeps_tx_hash() {
+        let signal = RwSignal::new(AdminTxState::default());
+        admin_tx_failed(signal, "bad input");
+        assert!(signal.get_untracked().message.is_some());
+
+        set_admin_tx_phase(signal, AdminTxPhase::Submitting);
+        let s = signal.get_untracked();
+        assert_eq!(s.phase, AdminTxPhase::Submitting);
+        assert!(s.message.is_none());
+    }
+
+    #[test]
+    fn admin_tx_failed_sets_phase_and_message() {
+        let signal = RwSignal::new(AdminTxState::default());
+        admin_tx_failed(signal, "Invalid merkle root: expected 32 bytes, got 10");
+        let s = signal.get_untracked();
+        assert_eq!(s.phase, AdminTxPhase::Failed);
+        assert_eq!(
+            s.message.as_deref(),
+            Some("Invalid merkle root: expected 32 bytes, got 10")
+        );
+    }
+
+    #[test]
+    fn admin_tx_done_sets_phase_and_tx_hash() {
+        let signal = RwSignal::new(AdminTxState::default());
+        admin_tx_done(signal, "0xfeed".into());
+        let s = signal.get_untracked();
+        assert_eq!(s.phase, AdminTxPhase::Done);
+        assert_eq!(s.tx_hash.as_deref(), Some("0xfeed"));
+    }
+
+    #[test]
+    fn admin_create_and_admin_close_signals_are_independent() {
+        let signals = AppSignals::new();
+        admin_tx_failed(signals.admin_create, "create failed");
+        admin_tx_done(signals.admin_close, "0x123".into());
+
+        assert_eq!(signals.admin_create.get_untracked().phase, AdminTxPhase::Failed);
+        assert_eq!(signals.admin_close.get_untracked().phase, AdminTxPhase::Done);
+    }
+}
