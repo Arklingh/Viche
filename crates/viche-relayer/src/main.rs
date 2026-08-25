@@ -13,6 +13,9 @@
 //!    - `GET  /api/polls/:id/tally`   — fetch per-option tallies.
 //!    - `POST /api/vote`              — accept a ZK proof + nullifier,
 //!      broadcast `VotingManager.castVote`, and return the transaction hash.
+//!    - `POST /api/admin/polls`       — owner-only, `Authorization: Bearer
+//!      <ADMIN_API_KEY>`: broadcast `createPoll`.
+//!    - `POST /api/admin/polls/:id/close` — owner-only: broadcast `closePoll`.
 //!
 //! ## Trust model
 //!
@@ -31,6 +34,14 @@
 //!                                                 v
 //!                                            VotingManager (chain)
 //! ```
+//!
+//! The `/api/admin/*` routes are a *separate* trust boundary: they sign with
+//! a dedicated `ADMIN_PRIVATE_KEY` (the `VotingManager` owner), gated by a
+//! shared-secret `ADMIN_API_KEY`, so a compromised relayer gas wallet alone
+//! can't create or close polls. This is one of two ways to administer
+//! polls — the other is the admin's own wallet calling `createPoll`/
+//! `closePoll` directly (see `viche-frontend`'s admin UI), which needs no
+//! relayer involvement at all.
 
 #![forbid(unsafe_code)]
 
@@ -67,11 +78,15 @@ async fn main() -> anyhow::Result<()> {
         voting_manager = %cfg.voting_manager_address,
         listen = %cfg.listen_addr,
         relayer_addr = ?cfg.relayer_private_key.address(),
+        admin_addr = ?cfg.admin_private_key.address(),
         "starting viche-relayer"
     );
 
-    // 2. Build the alloy provider with wallet + recommended fillers (gas
-    //    estimation, nonce management, chain-id fetch).
+    // 2. Build the alloy providers with wallet + recommended fillers (gas
+    //    estimation, nonce management, chain-id fetch) — one for the
+    //    relayer's vote-relay key, one for the admin (poll-owner) key. Two
+    //    separate wallets so a compromised relayer key alone can't sign
+    //    admin transactions.
     //
     // The `PrivateKeySigner` must be wrapped in an `EthereumWallet` to
     // satisfy the `NetworkWallet<Ethereum>` bound required by the
@@ -81,12 +96,20 @@ async fn main() -> anyhow::Result<()> {
     let provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
+        .on_http(rpc_url.clone());
+
+    let admin_wallet: EthereumWallet = cfg.admin_private_key.into();
+    let admin_provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(admin_wallet)
         .on_http(rpc_url);
 
     // 3. Build the Axum app and start the listener.
     let state = AppState {
         provider,
+        admin_provider,
         voting_manager_address: cfg.voting_manager_address,
+        admin_api_key: cfg.admin_api_key,
     };
     let app = router::<_, Http<HttpTlsClient>>(state);
 

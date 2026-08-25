@@ -13,6 +13,20 @@ use viche_core::wire::{NullifierHash, Proof, VoteResponse, VoteStatus};
 use crate::contract::IVotingManager;
 use crate::error::RelayError;
 
+/// Response for an admin (`createPoll`/`closePoll`) transaction.
+///
+/// Same "broadcast and return immediately" model as [`VoteResponse`] — see
+/// [`submit_create_poll`]'s doc comment for why the assigned `pollId` isn't
+/// part of this response.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdminTxResponse {
+    /// The broadcast transaction hash, hex-encoded.
+    pub tx_hash: String,
+    /// Lifecycle status — always `broadcast` today (see `submit_vote`'s docs
+    /// on why the relayer doesn't wait for inclusion).
+    pub status: VoteStatus,
+}
+
 /// Submit a vote on-chain.
 ///
 /// 1. Build the `castVote` calldata from the request fields.
@@ -63,7 +77,7 @@ where
 
     // Grab the hash immediately — we don't wait for mining.
     let tx_hash = pending.tx_hash();
-    let tx_hash_hex = format!("0x{:?}", tx_hash);
+    let tx_hash_hex = format!("{tx_hash:#x}");
 
     tracing::info!(
         poll_id = %poll_id,
@@ -72,6 +86,85 @@ where
     );
 
     Ok(VoteResponse {
+        tx_hash: tx_hash_hex,
+        status: VoteStatus::Broadcast,
+    })
+}
+
+/// Submit a `createPoll` transaction on-chain, signed by the configured
+/// **admin** key (`Config::admin_private_key` — deliberately not the
+/// relayer's vote-relay key; see that field's doc comment).
+///
+/// Same broadcast-and-return model as [`submit_vote`]: the assigned
+/// `pollId` is a Solidity return value, only observable once the
+/// transaction is mined, so it can't be part of this response. Callers
+/// should poll `GET /api/polls` (or the tx receipt) to discover the new id.
+///
+/// # Errors
+///
+/// The contract reverts with `Unauthorized()` if `admin_provider`'s wallet
+/// isn't `VotingManager.owner`, or `InvalidNumOptions()` /
+/// `InvalidDeadline()` for malformed poll parameters — none of these are
+/// pre-simulated (same tradeoff as `submit_vote`; see its doc comment).
+pub async fn submit_create_poll<P, T>(
+    admin_provider: P,
+    contract_address: Address,
+    merkle_root: B256,
+    num_options: U256,
+    deadline: U256,
+    metadata_uri: String,
+) -> Result<AdminTxResponse, RelayError>
+where
+    P: Provider<T, Ethereum>,
+    T: Transport + Clone,
+{
+    let contract = IVotingManager::new(contract_address, &admin_provider);
+    let call = contract.createPoll(merkle_root, num_options, deadline, metadata_uri);
+    let pending = call.send().await?;
+
+    let tx_hash = pending.tx_hash();
+    let tx_hash_hex = format!("{tx_hash:#x}");
+
+    tracing::info!(
+        tx_hash = %tx_hash_hex,
+        num_options = %num_options,
+        "createPoll transaction broadcast"
+    );
+
+    Ok(AdminTxResponse {
+        tx_hash: tx_hash_hex,
+        status: VoteStatus::Broadcast,
+    })
+}
+
+/// Submit a `closePoll` transaction on-chain, signed by the admin key.
+///
+/// # Errors
+///
+/// Reverts with `Unauthorized()` (not the owner) or `PollDoesNotExist(uint256)`.
+pub async fn submit_close_poll<P, T>(
+    admin_provider: P,
+    contract_address: Address,
+    poll_id: U256,
+) -> Result<AdminTxResponse, RelayError>
+where
+    P: Provider<T, Ethereum>,
+    T: Transport + Clone,
+{
+    let contract = IVotingManager::new(contract_address, &admin_provider);
+    let call = contract.closePoll(poll_id);
+    let pending = call.send().await?;
+
+    let tx_hash = pending.tx_hash();
+    let tx_hash_hex = format!("{tx_hash:#x}");
+
+    tracing::info!(
+        poll_id = %poll_id,
+        tx_hash = %tx_hash_hex,
+        "closePoll transaction broadcast"
+    );
+
+    Ok(AdminTxResponse {
         tx_hash: tx_hash_hex,
         status: VoteStatus::Broadcast,
     })

@@ -13,7 +13,17 @@ use std::str::FromStr;
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The relayer's funded EOA private key (hex, may or may not have 0x).
+    /// Only ever used to relay `castVote` — it has no special on-chain
+    /// privilege (`castVote` isn't access-controlled).
     pub relayer_private_key: PrivateKeySigner,
+    /// The `VotingManager.owner` private key, used to sign `createPoll` /
+    /// `closePoll`. Deliberately a *separate* key from
+    /// [`Self::relayer_private_key`] so a compromised relayer gas wallet
+    /// can't also administer polls.
+    pub admin_private_key: PrivateKeySigner,
+    /// Shared secret required (as `Authorization: Bearer <key>`) to call the
+    /// `/api/admin/*` routes.
+    pub admin_api_key: String,
     /// JSON-RPC endpoint URL.
     pub rpc_url: String,
     /// On-chain `VotingManager` address.
@@ -28,6 +38,10 @@ impl Config {
     /// # Required env vars
     ///
     /// - `RELAYER_PRIVATE_KEY` — hex private key for the funded relayer EOA.
+    /// - `ADMIN_PRIVATE_KEY`   — hex private key for the `VotingManager`
+    ///   owner (signs `createPoll`/`closePoll`). Should be a different key
+    ///   from `RELAYER_PRIVATE_KEY` in any real deployment.
+    /// - `ADMIN_API_KEY`       — shared secret guarding `/api/admin/*`.
     /// - `RPC_URL`              — JSON-RPC endpoint (e.g. `http://127.0.0.1:8545`).
     /// - `VOTING_MANAGER_ADDRESS` — deployed `VotingManager` contract address.
     ///
@@ -42,6 +56,16 @@ impl Config {
         let raw_key = std::env::var("RELAYER_PRIVATE_KEY")
             .map_err(|_| ConfigError::Missing("RELAYER_PRIVATE_KEY"))?;
         let relayer_private_key = parse_signer(&raw_key)?;
+
+        let raw_admin_key = std::env::var("ADMIN_PRIVATE_KEY")
+            .map_err(|_| ConfigError::Missing("ADMIN_PRIVATE_KEY"))?;
+        let admin_private_key = parse_signer(&raw_admin_key)?;
+
+        let admin_api_key =
+            std::env::var("ADMIN_API_KEY").map_err(|_| ConfigError::Missing("ADMIN_API_KEY"))?;
+        if admin_api_key.trim().is_empty() {
+            return Err(ConfigError::EmptyAdminApiKey);
+        }
 
         let rpc_url = std::env::var("RPC_URL").map_err(|_| ConfigError::Missing("RPC_URL"))?;
 
@@ -61,6 +85,8 @@ impl Config {
 
         Ok(Self {
             relayer_private_key,
+            admin_private_key,
+            admin_api_key,
             rpc_url,
             voting_manager_address,
             listen_addr,
@@ -95,6 +121,9 @@ pub enum ConfigError {
     /// The listen port is not a valid u16.
     #[error("invalid listen port")]
     InvalidPort,
+    /// `ADMIN_API_KEY` was set but blank.
+    #[error("ADMIN_API_KEY must not be empty")]
+    EmptyAdminApiKey,
 }
 
 #[cfg(test)]
