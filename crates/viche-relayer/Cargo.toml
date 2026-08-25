@@ -38,5 +38,12 @@ dotenvy.workspace = true
 hex = "0.4"
 url = "2"
 
+[dev-dependencies]
+# Only needed to construct a synthetic ErrorPayload in relay.rs's tests
+# (simulating what a reverted eth_call looks like on the wire, without a
+# live node). alloy_transport/alloy_contract already depend on this
+# transitively; pinned to match the workspace's alloy 0.3.6 resolution.
+alloy-json-rpc = "0.3.6"
+
 [lints.rust]
 unused = "allow"
