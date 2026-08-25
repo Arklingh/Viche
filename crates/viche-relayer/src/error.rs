@@ -37,6 +37,13 @@ pub enum RelayError {
     /// Deserialization / serialisation failure.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// Missing or incorrect `Authorization` header on an `/api/admin/*` route.
+    ///
+    /// Deliberately carries no detail (never "key missing" vs "key wrong") so
+    /// the response itself can't be used to probe the auth mechanism.
+    #[error("missing or invalid admin api key")]
+    Unauthorized,
 }
 
 impl IntoResponse for RelayError {
@@ -47,6 +54,7 @@ impl IntoResponse for RelayError {
             Self::Provider(_) => (StatusCode::BAD_GATEWAY, "PROVIDER_ERROR"),
             Self::Contract(_) => (StatusCode::BAD_GATEWAY, "CONTRACT_ERROR"),
             Self::Json(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
         };
         let body = ApiError {
             code,

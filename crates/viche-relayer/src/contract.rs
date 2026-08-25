@@ -8,7 +8,9 @@
 //!     type mismatch fails at build, not at runtime).
 //!
 //! The generated `IVotingManager` struct is instantiated at the deployed
-//! address + provider in [`crate::relay::submit_vote`].
+//! address + provider in [`crate::relay::submit_vote`] (relayer key) and
+//! [`crate::relay::submit_create_poll`] / [`crate::relay::submit_close_poll`]
+//! (admin key).
 //!
 //! NOTE: we bind to `IVotingManager` (the external interface), not
 //! `VotingManager` (which has internal storage structs `sol!` cannot parse).
@@ -31,6 +33,26 @@ use alloy::sol;
 sol! {
     #[sol(rpc)]
     interface IVotingManager {
+        /// @notice Create a new poll. Reverts (`Unauthorized`) if the caller
+        ///         isn't `VotingManager.owner` — see [`crate::relay::submit_create_poll`].
+        /// @param merkleRoot  Root of the Poseidon Merkle tree of identity
+        ///                    commitments eligible for this poll.
+        /// @param numOptions  Number of vote options (>= 2).
+        /// @param deadline    Unix timestamp after which voting is rejected.
+        /// @param metadataUri Off-chain pointer (IPFS/HTTP) to poll question,
+        ///                    option labels, etc. Not inspected on-chain.
+        /// @return pollId     The id assigned to the new poll.
+        function createPoll(
+            bytes32 merkleRoot,
+            uint256 numOptions,
+            uint256 deadline,
+            string metadataUri
+        ) external returns (uint256 pollId);
+
+        /// @notice Manually close a poll before its deadline. Reverts
+        ///         (`Unauthorized`) if the caller isn't `VotingManager.owner`.
+        function closePoll(uint256 pollId) external;
+
         /// @notice Cast an anonymous ballot.
         /// @param pollId        Target poll.
         /// @param proof         abi.encode(pA, pB, pC).
