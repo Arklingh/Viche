@@ -233,3 +233,21 @@ fn u256_to_u128(v: alloy_primitives::U256) -> u128 {
     buf.copy_from_slice(&bytes[..16]);
     u128::from_le_bytes(buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::U256;
+
+    #[test]
+    fn u256_to_u128_round_trips_small_values() {
+        assert_eq!(u256_to_u128(U256::from(0u64)), 0);
+        assert_eq!(u256_to_u128(U256::from(42u64)), 42);
+        assert_eq!(u256_to_u128(U256::from(u64::MAX)), u64::MAX as u128);
+    }
+
+    #[test]
+    fn u256_to_u128_round_trips_the_full_u128_range() {
+        assert_eq!(u256_to_u128(U256::from(u128::MAX)), u128::MAX);
+    }
+}
