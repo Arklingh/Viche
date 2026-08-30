@@ -140,6 +140,10 @@ of other projects.
 > ```
 > **Destroy** the randomness (`-e` values) after each step. The security of
 > the entire voting system rests on the integrity of this ceremony.
+>
+> See [`docs/trusted-setup-ceremony.md`](trusted-setup-ceremony.md) for the
+> full runbook: participant guidance, verification steps, what to publish,
+> and the contract-redeployment checklist this ceremony has to feed into.
 
 ---
 
