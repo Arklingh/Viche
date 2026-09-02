@@ -103,7 +103,18 @@ async function main() {
     console.log(`\nWrote ${PROOF}, ${PUBLIC}, and ${TEST_PROOF}`);
 }
 
-main().catch((e) => {
-    console.error(e);
-    process.exit(1);
-});
+main()
+    .then(() => {
+        // snarkjs's WASM curve backend (used by fullProve/verify above)
+        // spins up worker_threads for parallel field arithmetic and never
+        // tears them down, so the event loop never empties on its own —
+        // the process hangs forever after finishing real work. snarkjs's
+        // own CLI works around this the same way: exit explicitly instead
+        // of relying on the event loop draining. Mirrors the `fail()`
+        // path above, which already does this on error.
+        process.exit(0);
+    })
+    .catch((e) => {
+        console.error(e);
+        process.exit(1);
+    });

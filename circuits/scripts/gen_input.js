@@ -172,3 +172,16 @@ console.log("  merkleRoot    :", input.merkleRoot);
 console.log("  nullifierHash :", input.nullifierHash);
 console.log("  voteId        :", input.voteId);
 console.log("  commitments   :", commitments.map((c) => c.toString()));
+
+// Only exit when run directly (`node scripts/gen_input.js`, its documented
+// standalone usage), not when gen_proof.js dynamically imports this module —
+// that would kill gen_proof's process before it gets to actually generate a
+// proof. Precautionary, mirroring the confirmed fix in gen_proof.js: that
+// script hangs forever after finishing (verified locally) because snarkjs's
+// WASM curve backend leaves worker_threads running and the event loop never
+// empties on its own. circomlibjs's Poseidon backend here did NOT reproduce
+// that hang in local testing, but exiting explicitly costs nothing and
+// avoids the same class of bug if a future dependency bump changes that.
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
+    process.exit(0);
+}

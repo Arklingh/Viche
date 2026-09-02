@@ -17,7 +17,15 @@
       data-wasm-opt="z"
       data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int"
     />
-    <link data-trunk rel="copy-dir" href="public" />
+    <!-- data-target-path="/": without it, Trunk copies public/'s contents
+         to dist/public/ (preserving the source dir name), not dist/'s root.
+         Everything that references these assets — this file's own
+         `<script src="asset_cache.js">` below, and the circuit wasm/zkey
+         URLs in actions.rs — expects them at the site root
+         (/asset_cache.js, /circuits/vote.wasm), so without this they 404
+         (silently, as an HTML fallback page — no visible error until
+         something tries to WebAssembly.compile() the HTML it got back). -->
+    <link data-trunk rel="copy-dir" href="public" data-target-path="/" />
 
     <!-- Tailwind via CDN. For production, run Tailwind against the markup
          instead of shipping the runtime JIT, but the CDN is fine for a
