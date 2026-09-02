@@ -121,11 +121,13 @@ Groth16 needs a **per-circuit** trusted setup in two phases:
 2. **Circuit phase** (per `.circom`) — combines the r1cs with the ptau into a
    `*.zkey`, then multiple contributors each add randomness.
 
-For **testnet / hackathon**, Viche uses the public
-[`powersOfTau28_hez_final_20.ptau`](https://storage.googleapis.com/zkevm/ptau/)
-from the Hermez community ceremony and a single random beacon contribution.
-This is convenient but carries a toxic-waste assumption shared with thousands
-of other projects.
+For **testnet / hackathon**, Viche fetches a public "Perpetual Powers of Tau"
+ceremony file (currently mirrored by [PSE / Ethereum Foundation](https://github.com/privacy-ethereum/perpetualpowersoftau);
+see [`download_ptau.sh`](../circuits/scripts/download_ptau.sh) for the exact
+URL in use — it has changed once already when the previous mirror's bucket
+ACL was locked down, so treat the script as the source of truth over this
+doc) and adds a single random beacon contribution. This is convenient but
+carries a toxic-waste assumption shared with thousands of other projects.
 
 > **Before mainnet**, run a fresh ceremony:
 > ```bash
