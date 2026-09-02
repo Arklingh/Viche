@@ -57,22 +57,8 @@ install-snarkjs: ## Install snarkjs globally
 # ---------------------------------------------------------------------------
 # ZK circuit pipeline (Phase 1)
 # ---------------------------------------------------------------------------
-# download-ptau: ## Fetch powersOfTau28_hez_final_<depth>.ptau (dev ceremony)
-# 	@mkdir -p $(CIRCUITS_DIR)/ptau
-# 	@if [ ! -f $(CIRCUITS_DIR)/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau ]; then \
-# 	    echo ">> Downloading ptau (depth $(CIRCUIT_DEPTH)) — this is large, please wait"; \
-# 	    curl -L https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau \
-# 	        -o $(CIRCUITS_DIR)/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau; \
-# 	else echo ">> ptau already present, skipping"; fi
-
 download-ptau: ## Fetch powersOfTau28_hez_final_<depth>.ptau (dev ceremony)
-	@if not exist "$(CIRCUITS_DIR)\ptau" mkdir "$(CIRCUITS_DIR)\ptau"
-	@if not exist "$(CIRCUITS_DIR)\ptau\powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau" ( \
-		echo "Downloading ptau depth $(CIRCUIT_DEPTH) - this is large, please wait" && \
-		curl -L https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau -o "$(CIRCUITS_DIR)\ptau\powersOfTau28_hez_final_$(CIRCUIT_DEPTH).ptau" \
-	) else ( \
-		echo "ptau already present, skipping" \
-	)
+	cd $(CIRCUITS_DIR) && "C:\Program Files\Git\bin\bash.exe" -c "MERKLE_TREE_DEPTH=$(CIRCUIT_DEPTH) ./scripts/download_ptau.sh"
 
 circuits:
 	@echo "ptau already present, skipping"
