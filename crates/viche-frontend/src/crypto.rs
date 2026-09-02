@@ -67,19 +67,20 @@ impl CircomlibPoseidon {
             arr.push(v);
         }
 
-        // poseidon(inputs) returns a WASM pointer.
-        let poseidon_fn = js_sys::Reflect::get(&self.inner, &"poseidon".into())
-            .map_err(|_| PoseidonError::Bridge("poseidon is not a function".into()))?;
+        // `self.inner` (window.__VICHE_POSEIDON__) IS the poseidon function
+        // itself — circomlibjs's `buildPoseidon()` resolves to a callable
+        // function object with `.F` attached directly to it, not an object
+        // exposing a `.poseidon` method. Call it directly instead of looking
+        // up a nonexistent `.poseidon` property (that lookup always returned
+        // `undefined`, so every hash failed with "poseidon is not callable").
+        let poseidon_fn = self
+            .inner
+            .dyn_ref::<js_sys::Function>()
+            .ok_or_else(|| PoseidonError::Bridge("poseidon is not callable".into()))?;
         let poseidon_args = Array::new();
         poseidon_args.push(arr.as_ref());
-        let ptr = js_sys::Reflect::apply(
-            &poseidon_fn
-                .dyn_into::<js_sys::Function>()
-                .map_err(|_| PoseidonError::Bridge("poseidon is not callable".into()))?,
-            &self.inner,
-            &poseidon_args,
-        )
-        .map_err(|_| PoseidonError::Bridge("poseidon() call failed".into()))?;
+        let ptr = js_sys::Reflect::apply(poseidon_fn, &JsValue::UNDEFINED, &poseidon_args)
+            .map_err(|_| PoseidonError::Bridge("poseidon() call failed".into()))?;
 
         // F.toObject(ptr) extracts the field element as a bigint.
         let to_object_fn = js_sys::Reflect::get(&self.f, &"toObject".into())
