@@ -76,7 +76,7 @@ class MerkleTree {
     }
 }
 
-test("Viche Groth16 Circuit Test Suite", async (t) => {
+const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
     const poseidon = await buildPoseidon();
     const F = poseidon.F;
     const poseidon1 = (x) => F.toObject(poseidon([x]));
@@ -230,3 +230,30 @@ test("Viche Groth16 Circuit Test Suite", async (t) => {
         assert.notEqual(nullifier1, nullifier2, "Same voter + different pollId must produce distinct nullifiers");
     });
 });
+
+// snarkjs's WASM curve backend (built internally by groth16.fullProve/verify,
+// used in subtests 1-4 above) is a singleton cached on `globalThis.curve_bn128`
+// (see ffjavascript's buildBn128) backed by a worker_thread pool that's never
+// torn down on its own -- the event loop never empties, and `node --test`
+// hangs forever after every test above has already passed, until something
+// external kills it (CI's 6-hour job timeout, in practice).
+//
+// Unlike gen_proof.js (a plain script, fixed by calling process.exit()
+// directly), this is node:test's own runner: forcing an exit here races
+// node:test's reporter, which writes its summary asynchronously as the
+// suite promise settles -- confirmed by testing, exiting immediately (or
+// even after an awaited stdout write) truncates the printed summary before
+// all 5 subtests are reported, even though they all genuinely ran and
+// passed. Terminating the actual worker pool instead lets the process exit
+// *naturally* once node:test's own reporter is done, so there's nothing to
+// race.
+suite
+    .then(async () => {
+        if (globalThis.curve_bn128) {
+            await globalThis.curve_bn128.terminate();
+        }
+    })
+    .catch((err) => {
+        console.error(err);
+        process.exitCode = 1;
+    });

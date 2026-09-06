@@ -78,11 +78,15 @@ circom "${CIRCUITS_SRC}/${CIRCUIT}.circom" \
 
 # ---------------------------------------------------------------------------
 # 2. Powers-of-Tau (dev ceremony). Phase-1 (MPC) trusted setup file.
+#
+# Delegates to download_ptau.sh instead of duplicating the curl call here —
+# this used to be inline and diverge from download_ptau.sh's own copy of the
+# same logic, which is exactly how a source URL could go stale in one place
+# and not the other. One script, one URL, one error-handling path.
 # ---------------------------------------------------------------------------
 if [[ ! -f "${PTAU_FILE}" ]]; then
     echo ">> [2/6] downloading ptau (depth ${MERKLE_TREE_DEPTH})"
-    curl -L "https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_${MERKLE_TREE_DEPTH}.ptau" \
-        -o "${PTAU_FILE}"
+    MERKLE_TREE_DEPTH="${MERKLE_TREE_DEPTH}" bash "${SCRIPT_DIR}/download_ptau.sh"
 else
     echo ">> [2/6] ptau present, skipping download"
 fi
