@@ -218,12 +218,24 @@ try {
         $publicZkey = Join-Path $publicDir "vote_final.zkey"
         $publicWasm = Join-Path $publicDir "vote.wasm"
 
-        $needsZkeySync = (-not (Test-Path $publicZkey)) -or
-            ((Get-FileHash $buildZkey).Hash -ne (Get-FileHash $publicZkey).Hash)
-        $needsWasmSync = (Test-Path $buildWasm) -and (
-            (-not (Test-Path $publicWasm)) -or
-            ((Get-FileHash $buildWasm).Hash -ne (Get-FileHash $publicWasm).Hash)
-        )
+        # Deliberately not using -and/-or short-circuit-style chaining here:
+        # unlike && / ||, PowerShell's -and/-or evaluate BOTH sides always,
+        # so a one-liner would call Get-FileHash on a file that might not
+        # exist yet and fail before the existence check even mattered.
+        if (Test-Path $publicZkey) {
+            $needsZkeySync = (Get-FileHash $buildZkey).Hash -ne (Get-FileHash $publicZkey).Hash
+        } else {
+            $needsZkeySync = $true
+        }
+
+        $needsWasmSync = $false
+        if (Test-Path $buildWasm) {
+            if (Test-Path $publicWasm) {
+                $needsWasmSync = (Get-FileHash $buildWasm).Hash -ne (Get-FileHash $publicWasm).Hash
+            } else {
+                $needsWasmSync = $true
+            }
+        }
 
         if ($needsZkeySync) {
             Copy-Item $buildZkey $publicZkey -Force
@@ -290,6 +302,15 @@ try {
             }
         }
     }
+} catch {
+    # Built-in cmdlet errors (e.g. "Cannot bind argument to parameter 'Path'
+    # because it is null") don't say WHICH line called the cmdlet or what
+    # was actually null -- PositionMessage does, so surface it instead of
+    # letting PowerShell's default one-line summary hide that.
+    Write-Host ""
+    Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor Red
+    exit 1
 } finally {
     Stop-AllChildren
 }
