@@ -11,23 +11,28 @@
     hot reload instead of a full container rebuild per change.
 
     What it does, in order:
-      1. Kills any anvil/viche-relayer/trunk processes left over from a
+      1. Checks contracts/lib/forge-std (a git submodule) is actually
+         populated, and runs `git submodule update --init --recursive` if
+         it isn't — a plain `git clone` without --recurse-submodules leaves
+         it empty, which otherwise fails deep inside `forge script` with a
+         confusing "cannot find Script.sol" error.
+      2. Kills any anvil/viche-relayer/trunk processes left over from a
          previous run (stale locks on :8545/:3000/:8080 are the #1 cause of
          "why won't this start").
-      2. Starts anvil and waits for its RPC to respond.
-      3. Deploys VotingManager (+ Groth16Verifier, if VERIFIER_ADDRESS isn't
+      3. Starts anvil and waits for its RPC to respond.
+      4. Deploys VotingManager (+ Groth16Verifier, if VERIFIER_ADDRESS isn't
          already set) via the existing Foundry script, and captures the
          printed addresses.
-      4. Writes crates/viche-relayer/.env from .env.example (if missing) and
+      5. Writes crates/viche-relayer/.env from .env.example (if missing) and
          patches in the freshly deployed addresses.
-      5. Resyncs crates/viche-frontend/public/circuits/{vote.wasm,
+      6. Resyncs crates/viche-frontend/public/circuits/{vote.wasm,
          vote_final.zkey} from circuits/build/ if they've drifted — this
          exact staleness silently breaks every on-chain vote with
          "InvalidProof" and does NOT show up until you actually try to vote,
          so it's worth checking on every start, not just once.
-      6. Starts viche-relayer (cargo run) and waits for /health.
-      7. Starts the Trunk dev server (hot reload) for the frontend.
-      8. Prints URLs and PIDs, then blocks — Ctrl+C tears everything down.
+      7. Starts viche-relayer (cargo run) and waits for /health.
+      8. Starts the Trunk dev server (hot reload) for the frontend.
+      9. Prints URLs and PIDs, then blocks — Ctrl+C tears everything down.
 
 .PARAMETER SkipDeploy
     Skip steps 2-3 (anvil start + contract deploy) and reuse whatever's
@@ -124,6 +129,25 @@ try {
         Require-Command forge
     }
 
+    if (-not $SkipDeploy) {
+        # contracts/lib/forge-std is a git submodule (see .gitmodules) — a
+        # plain `git clone` without --recurse-submodules leaves it as an
+        # empty directory, which makes `forge script` fail deep inside solc
+        # with a confusing "cannot find Script.sol" path error rather than
+        # anything mentioning submodules. Catch it here instead.
+        $forgeStdMarker = Join-Path $RepoRoot "contracts\lib\forge-std\src\Script.sol"
+        if (-not (Test-Path $forgeStdMarker)) {
+            Write-Step "contracts/lib/forge-std submodule not initialized — fetching it..."
+            if (Get-Command git -ErrorAction SilentlyContinue) {
+                & git -C $RepoRoot submodule update --init --recursive
+            }
+            if (-not (Test-Path $forgeStdMarker)) {
+                Write-Error "contracts/lib/forge-std is still missing Script.sol after 'git submodule update --init --recursive'. Run that command manually from $RepoRoot and check its output."
+                exit 1
+            }
+        }
+    }
+
     Write-Step "Clearing any leftover anvil/viche-relayer/trunk processes..."
     foreach ($name in @("anvil", "viche-relayer", "trunk")) {
         Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -147,7 +171,7 @@ try {
 
         if ($LASTEXITCODE -ne 0) {
             Write-Host (Get-Content $deployLog -Raw)
-            Write-Error "Contract deploy failed. Has 'make circuits' been run? See $deployLog."
+            Write-Error "Contract deploy failed — see $deployLog. Common causes: 'make circuits' hasn't been run yet (VotingManager needs the generated Groth16Verifier.sol), or a missing/stale git submodule under contracts/lib."
             exit 1
         }
 
