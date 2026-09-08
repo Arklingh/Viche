@@ -5,7 +5,7 @@
     running in parallel with logs streamed to files.
 
 .DESCRIPTION
-    This is the "one command, everything's up" script for local development —
+    This is the "one command, everything's up" script for local development --
     the native-toolchain equivalent of `docker-compose up`, but using
     `cargo run`/`trunk serve` directly so you get incremental compilation and
     hot reload instead of a full container rebuild per change.
@@ -13,7 +13,7 @@
     What it does, in order:
       1. Checks contracts/lib/forge-std (a git submodule) is actually
          populated, and runs `git submodule update --init --recursive` if
-         it isn't — a plain `git clone` without --recurse-submodules leaves
+         it isn't -- a plain `git clone` without --recurse-submodules leaves
          it empty, which otherwise fails deep inside `forge script` with a
          confusing "cannot find Script.sol" error.
       2. Kills any anvil/viche-relayer/trunk processes left over from a
@@ -26,13 +26,13 @@
       5. Writes crates/viche-relayer/.env from .env.example (if missing) and
          patches in the freshly deployed addresses.
       6. Resyncs crates/viche-frontend/public/circuits/{vote.wasm,
-         vote_final.zkey} from circuits/build/ if they've drifted — this
+         vote_final.zkey} from circuits/build/ if they've drifted -- this
          exact staleness silently breaks every on-chain vote with
          "InvalidProof" and does NOT show up until you actually try to vote,
          so it's worth checking on every start, not just once.
       7. Starts viche-relayer (cargo run) and waits for /health.
       8. Starts the Trunk dev server (hot reload) for the frontend.
-      9. Prints URLs and PIDs, then blocks — Ctrl+C tears everything down.
+      9. Prints URLs and PIDs, then blocks -- Ctrl+C tears everything down.
 
 .PARAMETER SkipDeploy
     Skip steps 2-3 (anvil start + contract deploy) and reuse whatever's
@@ -130,14 +130,14 @@ try {
     }
 
     if (-not $SkipDeploy) {
-        # contracts/lib/forge-std is a git submodule (see .gitmodules) — a
+        # contracts/lib/forge-std is a git submodule (see .gitmodules) -- a
         # plain `git clone` without --recurse-submodules leaves it as an
         # empty directory, which makes `forge script` fail deep inside solc
         # with a confusing "cannot find Script.sol" path error rather than
         # anything mentioning submodules. Catch it here instead.
         $forgeStdMarker = Join-Path $RepoRoot "contracts\lib\forge-std\src\Script.sol"
         if (-not (Test-Path $forgeStdMarker)) {
-            Write-Step "contracts/lib/forge-std submodule not initialized — fetching it..."
+            Write-Step "contracts/lib/forge-std submodule not initialized -- fetching it..."
             if (Get-Command git -ErrorAction SilentlyContinue) {
                 & git -C $RepoRoot submodule update --init --recursive
             }
@@ -171,7 +171,7 @@ try {
 
         if ($LASTEXITCODE -ne 0) {
             Write-Host (Get-Content $deployLog -Raw)
-            Write-Error "Contract deploy failed — see $deployLog. Common causes: 'make circuits' hasn't been run yet (VotingManager needs the generated Groth16Verifier.sol), or a missing/stale git submodule under contracts/lib."
+            Write-Error "Contract deploy failed -- see $deployLog. Common causes: 'make circuits' hasn't been run yet (VotingManager needs the generated Groth16Verifier.sol), or a missing/stale git submodule under contracts/lib."
             exit 1
         }
 
@@ -201,12 +201,12 @@ try {
         Set-Content -Path $envPath -Value $envContent -NoNewline
 
         # Registration state from a previous poll shouldn't survive a fresh
-        # anvil + fresh contracts underneath it — the old merkle roots it's
+        # anvil + fresh contracts underneath it -- the old merkle roots it's
         # keyed by will never match anything on the new chain.
         $registrationsPath = Join-Path $RelayerDir "registrations.json"
         if (Test-Path $registrationsPath) { Remove-Item $registrationsPath }
     } else {
-        Write-Step "Skipping deploy (-SkipDeploy) — reusing crates/viche-relayer/.env as-is."
+        Write-Step "Skipping deploy (-SkipDeploy) -- reusing crates/viche-relayer/.env as-is."
     }
 
     Write-Step "Checking frontend circuit assets are in sync with circuits/build..."
@@ -237,7 +237,7 @@ try {
             Write-Host "   already in sync"
         }
     } else {
-        Write-Host "   circuits/build/vote_final.zkey not found — run 'make circuits' first if you need real voting to work." -ForegroundColor Yellow
+        Write-Host "   circuits/build/vote_final.zkey not found -- run 'make circuits' first if you need real voting to work." -ForegroundColor Yellow
         Write-Host "   (poll creation/admin flows work fine without it; only proof generation needs it)" -ForegroundColor Yellow
     }
 
@@ -256,7 +256,7 @@ try {
     # Trunk's CLI only accepts NO_COLOR as literally "true"/"false"; some
     # shells (this one included) set the widely-used "1" convention instead,
     # which makes trunk refuse to start at all. Clear it for this child
-    # process only — doesn't touch the value in your own shell.
+    # process only -- doesn't touch the value in your own shell.
     $prevNoColor = $env:NO_COLOR
     $env:NO_COLOR = $null
     $trunkProc = Start-Process -FilePath "trunk" -ArgumentList "serve" `
