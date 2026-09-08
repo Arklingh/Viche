@@ -132,7 +132,7 @@ fn VoterRegistrationPanel(
 
             <button
                 class="w-full py-3 rounded-lg bg-brand-600 hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium transition"
-                disabled=is_building()
+                disabled=is_building
                 on:click={
                     let s = signals.clone();
                     move |_: MouseEvent| {

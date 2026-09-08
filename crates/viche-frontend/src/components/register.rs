@@ -107,8 +107,14 @@ mod tests {
         next_tick().await;
 
         let text = container.text_content().unwrap_or_default();
-        assert!(text.contains("Connect your wallet to register"));
-        assert!(!text.contains("Register to Vote"));
+        assert!(text.contains("Connect your wallet to register"), "unexpected content: {text}");
+        // The page's own <h2> title is "Register to Vote" too, so checking
+        // for that phrase's absence would be checking the wrong thing —
+        // assert the actual register *button* isn't rendered instead.
+        assert!(
+            container.query_selector("button").unwrap().is_none(),
+            "no register button should render while disconnected: {text}"
+        );
     }
 
     #[wasm_bindgen_test]
