@@ -29,6 +29,13 @@ pub fn Header(#[prop(into)] signals: AppSignals) -> impl IntoView {
                 </button>
 
                 <div class="flex items-center gap-3">
+                    <button
+                        class="text-sm px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"
+                        on:click=move |_| view_signal.set(View::Register)
+                    >
+                        "Register to Vote"
+                    </button>
+
                     {move || is_admin.get().then(|| view! {
                         <button
                             class="text-sm px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"

@@ -16,6 +16,17 @@
 //!    - `POST /api/admin/polls`       — owner-only, `Authorization: Bearer
 //!      <ADMIN_API_KEY>`: broadcast `createPoll`.
 //!    - `POST /api/admin/polls/:id/close` — owner-only: broadcast `closePoll`.
+//!    - `POST /api/register`          — public: submit an identity
+//!      commitment ahead of the next poll (see `crate::registration`).
+//!    - `GET  /api/admin/registrations/pending` — owner-only: the current
+//!      unpublished commitment batch.
+//!    - `POST /api/admin/registrations/snapshot` — owner-only: lock in the
+//!      current batch so the admin's browser can build a Merkle tree from it.
+//!    - `POST /api/admin/registrations/publish`  — owner-only: store the
+//!      resulting root -> commitment-list mapping for voters to fetch later.
+//!    - `GET  /api/polls/:id/registrations` — public: the commitment list a
+//!      poll's whitelist was built from, so a voter's browser can rebuild
+//!      the tree and extract its own membership proof.
 //!
 //! ## Trust model
 //!
@@ -50,12 +61,17 @@ mod contract;
 mod error;
 mod handlers;
 mod queries;
+mod registration;
 mod relay;
+
+use std::sync::Arc;
 
 use alloy::network::EthereumWallet;
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::http::{Client as HttpTlsClient, Http};
+
+use crate::registration::RegistrationStore;
 
 use crate::config::Config;
 use crate::handlers::{router, AppState};
@@ -104,12 +120,16 @@ async fn main() -> anyhow::Result<()> {
         .wallet(admin_wallet)
         .on_http(rpc_url);
 
-    // 3. Build the Axum app and start the listener.
+    // 3. Load the voter-registration store (see `crate::registration`).
+    let registrations = Arc::new(RegistrationStore::load(cfg.registrations_file).await);
+
+    // 4. Build the Axum app and start the listener.
     let state = AppState {
         provider,
         admin_provider,
         voting_manager_address: cfg.voting_manager_address,
         admin_api_key: cfg.admin_api_key,
+        registrations,
     };
     let app = router::<_, Http<HttpTlsClient>>(state);
 

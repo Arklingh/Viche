@@ -1,0 +1,71 @@
+# Dockerfile.relayer — Production image for the viche-relayer service.
+#
+# Multi-stage: a full Rust toolchain builds the release binary, then a slim
+# Debian image runs it with no compiler/build tooling on board. This is
+# distinct from Dockerfile.dev (the all-in-one local dev container with
+# circom/wasm-pack/trunk/anvil) — this image only ever runs `viche-relayer`.
+#
+# Build (from the repo root — needed so the workspace's path dependency on
+# ../crates/viche-core resolves):
+#   docker build -f Dockerfile.relayer -t viche-relayer .
+#
+# Run:
+#   docker run --rm -p 3000:3000 --env-file crates/viche-relayer/.env viche-relayer
+#
+# See docs/deployment.md for the full testnet deployment runbook.
+
+# ---- Builder -----------------------------------------------------------
+# Track current stable (matches CI's `dtolnay/rust-toolchain@stable`) rather
+# than pinning a version that drifts behind the workspace's Cargo.lock —
+# unlike Dockerfile.dev's pinned `rust:1.80-bookworm`, which is a separate,
+# already-stale image not touched here.
+FROM rust:1-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the whole workspace: viche-relayer depends on viche-core via a path
+# dependency, and Cargo needs the full workspace manifest to resolve it.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/viche-core crates/viche-core
+COPY crates/viche-relayer crates/viche-relayer
+
+# The frontend crate is a workspace member too, but it targets
+# wasm32-unknown-unknown and isn't needed to build the relayer. Cargo still
+# reads its Cargo.toml when resolving the workspace, so a stub keeps the
+# build from having to compile (or even fetch deps for) the real thing.
+# It's a `[lib]` crate (compiled via wasm-bindgen, no [[bin]]), so the stub
+# needs a src/lib.rs, not a main.rs.
+COPY crates/viche-frontend/Cargo.toml crates/viche-frontend/Cargo.toml
+RUN mkdir -p crates/viche-frontend/src \
+    && touch crates/viche-frontend/src/lib.rs
+
+RUN cargo build --release -p viche-relayer
+
+# ---- Runtime -------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --shell /usr/sbin/nologin viche
+
+COPY --from=builder /app/target/release/viche-relayer /usr/local/bin/viche-relayer
+
+# Config comes entirely from environment variables (see
+# crates/viche-relayer/.env.example) — no config file is baked into the
+# image. REGISTRATIONS_FILE defaults to a relative path, so give it a fixed,
+# writable home and a volume mount point for persistence across restarts.
+ENV REGISTRATIONS_FILE=/data/registrations.json
+RUN mkdir -p /data && chown viche:viche /data
+VOLUME ["/data"]
+
+USER viche
+EXPOSE 3000
+
+ENTRYPOINT ["/usr/local/bin/viche-relayer"]

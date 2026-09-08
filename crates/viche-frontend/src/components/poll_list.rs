@@ -86,6 +86,9 @@ fn PollCard(#[prop(into)] signals: AppSignals, poll: PollData) -> impl IntoView 
                         <PollStatusBadge active=poll.active />
                         <span class="text-xs text-slate-500">"Poll #"{poll_id.clone()}</span>
                     </div>
+                    {(!poll.metadata_uri.is_empty()).then(|| view! {
+                        <p class="text-slate-100 font-medium mb-1">{poll.metadata_uri.clone()}</p>
+                    })}
                     <p class="text-slate-300">
                         {poll.num_options.to_string()}
                         " options"

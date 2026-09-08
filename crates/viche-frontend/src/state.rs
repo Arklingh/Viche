@@ -111,6 +111,67 @@ pub fn admin_tx_done(signal: RwSignal<AdminTxState>, tx_hash: String) {
 }
 
 // =========================================================================
+// Voter registration lifecycle (the "Register to Vote" page)
+// =========================================================================
+
+/// Where a `POST /api/register` submission is in its lifecycle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RegisterPhase {
+    /// Idle — nothing submitted yet this session.
+    #[default]
+    Idle,
+    /// Computing the commitment and POSTing to the relayer.
+    Submitting,
+    /// Relayer accepted the commitment.
+    Done,
+    /// Failed at some step.
+    Failed,
+}
+
+/// The state of an in-flight (or just-finished) registration submission.
+#[derive(Debug, Clone, Default)]
+pub struct RegisterState {
+    /// Current phase.
+    pub phase: RegisterPhase,
+    /// Human-readable status / error message.
+    pub message: Option<String>,
+    /// Total commitments pending (not yet locked into a poll) after a
+    /// successful submission, as reported by the relayer.
+    pub total_pending: Option<usize>,
+}
+
+// =========================================================================
+// Admin whitelist-building lifecycle (snapshot -> build tree -> publish)
+// =========================================================================
+
+/// Where the admin's "build whitelist from registrations" flow is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WhitelistBuildPhase {
+    /// Idle — no build in progress.
+    #[default]
+    Idle,
+    /// Snapshotting the pending batch and building the Merkle tree.
+    Building,
+    /// Tree built and published; `merkle_root` is ready to use.
+    Done,
+    /// Failed at some step.
+    Failed,
+}
+
+/// The state of an in-flight (or just-finished) whitelist build.
+#[derive(Debug, Clone, Default)]
+pub struct WhitelistBuildState {
+    /// Current phase.
+    pub phase: WhitelistBuildPhase,
+    /// Human-readable status / error message.
+    pub message: Option<String>,
+    /// The computed Merkle root (0x-prefixed hex), once built.
+    pub merkle_root: Option<String>,
+    /// How many commitments went into the tree.
+    pub commitment_count: Option<usize>,
+}
+
+// =========================================================================
 // Page navigation
 // =========================================================================
 
@@ -121,6 +182,8 @@ pub enum View {
     List,
     /// A single poll detail + vote form.
     Detail(String),
+    /// Voter registration (submit an identity commitment ahead of the next poll).
+    Register,
     /// Poll administration (create / close), owner-only.
     Admin,
 }
@@ -159,6 +222,15 @@ pub struct AppSignals {
     pub admin_create: RwSignal<AdminTxState>,
     /// State of an in-flight "close poll" transaction.
     pub admin_close: RwSignal<AdminTxState>,
+    /// State of an in-flight "register to vote" submission.
+    pub register: RwSignal<RegisterState>,
+    /// State of an in-flight admin "build whitelist from registrations" flow.
+    pub whitelist_build: RwSignal<WhitelistBuildState>,
+    /// Count of currently-pending (not yet snapshotted) registrations, for
+    /// the admin panel. `None` = not yet fetched.
+    pub pending_registrations: RwSignal<Option<usize>>,
+    /// Error from the last pending-registrations fetch, if any.
+    pub pending_registrations_error: RwSignal<Option<String>>,
 }
 
 impl AppSignals {
@@ -175,6 +247,10 @@ impl AppSignals {
             is_admin: RwSignal::new(false),
             admin_create: RwSignal::new(AdminTxState::default()),
             admin_close: RwSignal::new(AdminTxState::default()),
+            register: RwSignal::new(RegisterState::default()),
+            whitelist_build: RwSignal::new(WhitelistBuildState::default()),
+            pending_registrations: RwSignal::new(None),
+            pending_registrations_error: RwSignal::new(None),
         }
     }
 
@@ -231,6 +307,55 @@ impl AppSignals {
     /// Reset vote state to idle.
     pub fn vote_reset(&self) {
         self.vote.set(VoteState::default());
+    }
+
+    /// Move the registration state to a new phase.
+    pub fn register_phase(&self, phase: RegisterPhase) {
+        self.register.update(|r| {
+            r.phase = phase;
+            r.message = None;
+        });
+    }
+
+    /// Record a registration failure.
+    pub fn register_failed(&self, msg: impl Into<String>) {
+        self.register.update(|r| {
+            r.phase = RegisterPhase::Failed;
+            r.message = Some(msg.into());
+        });
+    }
+
+    /// Record a successful registration.
+    pub fn register_done(&self, total_pending: usize) {
+        self.register.update(|r| {
+            r.phase = RegisterPhase::Done;
+            r.total_pending = Some(total_pending);
+        });
+    }
+
+    /// Move the whitelist-build state to a new phase.
+    pub fn whitelist_build_phase(&self, phase: WhitelistBuildPhase) {
+        self.whitelist_build.update(|w| {
+            w.phase = phase;
+            w.message = None;
+        });
+    }
+
+    /// Record a whitelist-build failure.
+    pub fn whitelist_build_failed(&self, msg: impl Into<String>) {
+        self.whitelist_build.update(|w| {
+            w.phase = WhitelistBuildPhase::Failed;
+            w.message = Some(msg.into());
+        });
+    }
+
+    /// Record a successful whitelist build.
+    pub fn whitelist_build_done(&self, merkle_root: String, commitment_count: usize) {
+        self.whitelist_build.update(|w| {
+            w.phase = WhitelistBuildPhase::Done;
+            w.merkle_root = Some(merkle_root);
+            w.commitment_count = Some(commitment_count);
+        });
     }
 }
 
@@ -385,6 +510,46 @@ mod tests {
         let s = signal.get_untracked();
         assert_eq!(s.phase, AdminTxPhase::Done);
         assert_eq!(s.tx_hash.as_deref(), Some("0xfeed"));
+    }
+
+    #[test]
+    fn register_phase_transitions_clear_message() {
+        let signals = AppSignals::new();
+        signals.register_failed("nope");
+        assert!(signals.register.get_untracked().message.is_some());
+
+        signals.register_phase(RegisterPhase::Submitting);
+        let r = signals.register.get_untracked();
+        assert_eq!(r.phase, RegisterPhase::Submitting);
+        assert!(r.message.is_none());
+    }
+
+    #[test]
+    fn register_done_sets_phase_and_pending_count() {
+        let signals = AppSignals::new();
+        signals.register_done(3);
+        let r = signals.register.get_untracked();
+        assert_eq!(r.phase, RegisterPhase::Done);
+        assert_eq!(r.total_pending, Some(3));
+    }
+
+    #[test]
+    fn whitelist_build_done_sets_phase_root_and_count() {
+        let signals = AppSignals::new();
+        signals.whitelist_build_done("0xabc".into(), 5);
+        let w = signals.whitelist_build.get_untracked();
+        assert_eq!(w.phase, WhitelistBuildPhase::Done);
+        assert_eq!(w.merkle_root.as_deref(), Some("0xabc"));
+        assert_eq!(w.commitment_count, Some(5));
+    }
+
+    #[test]
+    fn whitelist_build_failed_sets_phase_and_message() {
+        let signals = AppSignals::new();
+        signals.whitelist_build_failed("no registrations to snapshot");
+        let w = signals.whitelist_build.get_untracked();
+        assert_eq!(w.phase, WhitelistBuildPhase::Failed);
+        assert_eq!(w.message.as_deref(), Some("no registrations to snapshot"));
     }
 
     #[test]

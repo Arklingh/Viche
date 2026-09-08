@@ -8,12 +8,21 @@
 //!   - `GET  /api/polls/:id/tally` — fetch a poll's per-option tallies.
 //!   - `POST /api/admin/polls`        — owner-only: create a poll.
 //!   - `POST /api/admin/polls/:id/close` — owner-only: close a poll.
+//!   - `POST /api/register`           — public: submit an identity commitment.
+//!   - `GET  /api/admin/registrations/pending`  — owner-only: current batch.
+//!   - `POST /api/admin/registrations/snapshot` — owner-only: lock in the batch.
+//!   - `POST /api/admin/registrations/publish`  — owner-only: store its root.
+//!   - `GET  /api/polls/:id/registrations` — public: a poll's commitment list.
 //!
 //! The vote handler is a thin shim: parse → validate → relay → respond.
 //! The poll handlers delegate to [`crate::queries`] for the chain reads.
 //! The admin handlers require `Authorization: Bearer <ADMIN_API_KEY>` and
 //! sign with a separate key from the vote-relay path — see
 //! [`crate::config::Config::admin_private_key`].
+//! The registration handlers delegate to [`crate::registration`] — see that
+//! module for why voter registration needs any relayer-side state at all.
+
+use std::sync::Arc;
 
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, U256};
@@ -24,10 +33,16 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use viche_core::wire::{PollData, PollListResponse, TallyResponse, VoteRequest, VoteResponse};
+use viche_core::field::ensure_in_field;
+use viche_core::wire::{
+    CommitmentListResponse, PollData, PollListResponse, PublishRegistrationRequest,
+    PublishRegistrationResponse, RegisterRequest, RegisterResponse, TallyResponse, VoteRequest,
+    VoteResponse,
+};
 
 use crate::error::RelayError;
 use crate::queries::{fetch_all_polls, fetch_poll, fetch_tally};
+use crate::registration::RegistrationStore;
 use crate::relay::{submit_close_poll, submit_create_poll, submit_vote, AdminTxResponse};
 
 /// Application state shared across all handlers via Axum's `State` extractor.
@@ -45,6 +60,8 @@ pub struct AppState<P> {
     pub voting_manager_address: Address,
     /// Shared secret required on `/api/admin/*` requests.
     pub admin_api_key: String,
+    /// Pre-poll voter registration store — see [`crate::registration`].
+    pub registrations: Arc<RegistrationStore>,
 }
 
 /// Build the Axum router from the given state.
@@ -64,6 +81,23 @@ where
         .route("/api/polls/:id/tally", get(get_tally::<P, T>))
         .route("/api/admin/polls", post(create_poll::<P, T>))
         .route("/api/admin/polls/:id/close", post(close_poll::<P, T>))
+        .route("/api/register", post(register::<P, T>))
+        .route(
+            "/api/admin/registrations/pending",
+            get(pending_registrations::<P, T>),
+        )
+        .route(
+            "/api/admin/registrations/snapshot",
+            post(snapshot_registrations::<P, T>),
+        )
+        .route(
+            "/api/admin/registrations/publish",
+            post(publish_registration::<P, T>),
+        )
+        .route(
+            "/api/polls/:id/registrations",
+            get(poll_registrations::<P, T>),
+        )
         .with_state(state)
 }
 
@@ -294,6 +328,116 @@ where
     let resp =
         submit_close_poll(state.admin_provider, state.voting_manager_address, poll_id).await?;
     Ok(Json(resp))
+}
+
+/// `POST /api/register`
+///
+/// Public — anyone may submit an identity commitment ahead of the next poll.
+/// This is safe to leave open: a commitment is a one-way hash
+/// (`Poseidon(secret)`), so it reveals nothing about the submitter, and it
+/// only ever becomes a poll's whitelist if the admin later builds a tree
+/// from it and creates a poll with the resulting root — the relayer itself
+/// grants no voting power. See [`crate::registration`].
+async fn register<P, T>(
+    State(state): State<AppState<P>>,
+    Json(req): Json<RegisterRequest>,
+) -> Result<Json<RegisterResponse>, RelayError>
+where
+    P: Provider<T, Ethereum> + Clone + Send + Sync,
+    T: Transport + Clone,
+{
+    ensure_in_field(&req.commitment).map_err(|e| RelayError::Validation(e.to_string()))?;
+    let total_pending = state.registrations.register(req.commitment).await?;
+    Ok(Json(RegisterResponse { total_pending }))
+}
+
+/// `GET /api/admin/registrations/pending`
+///
+/// Owner-only. Returns the commitment batch collected since the last
+/// `snapshot` call.
+async fn pending_registrations<P, T>(
+    State(state): State<AppState<P>>,
+    headers: HeaderMap,
+) -> Result<Json<CommitmentListResponse>, RelayError>
+where
+    P: Provider<T, Ethereum> + Clone + Send + Sync,
+    T: Transport + Clone,
+{
+    require_admin_auth(&headers, &state.admin_api_key)?;
+    let commitments = state.registrations.pending().await;
+    Ok(Json(CommitmentListResponse { commitments }))
+}
+
+/// `POST /api/admin/registrations/snapshot`
+///
+/// Owner-only. Atomically locks in the current pending batch (any further
+/// `/api/register` calls start a fresh batch for the *next* poll) and
+/// returns it so the admin's browser can build a Merkle tree and compute the
+/// root. Follow up with `POST /api/admin/registrations/publish` once that
+/// root is known.
+async fn snapshot_registrations<P, T>(
+    State(state): State<AppState<P>>,
+    headers: HeaderMap,
+) -> Result<Json<CommitmentListResponse>, RelayError>
+where
+    P: Provider<T, Ethereum> + Clone + Send + Sync,
+    T: Transport + Clone,
+{
+    require_admin_auth(&headers, &state.admin_api_key)?;
+    let commitments = state.registrations.snapshot().await;
+    Ok(Json(CommitmentListResponse { commitments }))
+}
+
+/// `POST /api/admin/registrations/publish`
+///
+/// Owner-only. Stores the most recent snapshot under `merkle_root` so
+/// `GET /api/polls/:id/registrations` can later serve it to voters. Errors
+/// if no snapshot is pending (i.e. `snapshot` was never called, or already
+/// published under a different root — republishing under the same list's
+/// true root is harmless and idempotent).
+async fn publish_registration<P, T>(
+    State(state): State<AppState<P>>,
+    headers: HeaderMap,
+    Json(req): Json<PublishRegistrationRequest>,
+) -> Result<Json<PublishRegistrationResponse>, RelayError>
+where
+    P: Provider<T, Ethereum> + Clone + Send + Sync,
+    T: Transport + Clone,
+{
+    require_admin_auth(&headers, &state.admin_api_key)?;
+    let commitment_count = state.registrations.publish(req.merkle_root).await?;
+    Ok(Json(PublishRegistrationResponse { commitment_count }))
+}
+
+/// `GET /api/polls/:id/registrations`
+///
+/// Public. Looks up the poll's on-chain `merkle_root`, then returns the
+/// commitment list published under that root (if any) — the leaf set a
+/// voter's browser needs to rebuild the tree and extract its own membership
+/// proof. Returns a validation error if the poll wasn't created via the
+/// registration flow (e.g. a hand-computed root with no published list).
+async fn poll_registrations<P, T>(
+    State(state): State<AppState<P>>,
+    Path(id): Path<String>,
+) -> Result<Json<CommitmentListResponse>, RelayError>
+where
+    P: Provider<T, Ethereum> + Clone + Send + Sync,
+    T: Transport + Clone,
+{
+    let poll_id = parse_poll_id(&id)?;
+    let poll = fetch_poll(state.provider, state.voting_manager_address, poll_id).await?;
+    let commitments = state
+        .registrations
+        .for_root(&poll.merkle_root)
+        .await
+        .ok_or_else(|| {
+            RelayError::Validation(format!(
+                "no registration data found for poll {} (it may have been created \
+                 without the registration flow)",
+                poll_id
+            ))
+        })?;
+    Ok(Json(CommitmentListResponse { commitments }))
 }
 
 /// Verify the `Authorization: Bearer <key>` header against `expected`.

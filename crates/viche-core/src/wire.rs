@@ -251,6 +251,14 @@ pub struct PollData {
     pub total_votes: U256,
     /// Whether the poll is currently accepting votes.
     pub active: bool,
+    /// Off-chain pointer (or literal text) describing the poll question and
+    /// option labels, as supplied at creation time. Not validated or
+    /// interpreted here — only stored on-chain in the `PollCreated` event
+    /// (never in contract storage), so the relayer recovers it from event
+    /// logs rather than `getPoll`. Empty string if none was set or if it
+    /// could not be recovered.
+    #[serde(default)]
+    pub metadata_uri: String,
 }
 
 /// Response for `GET /api/polls`.
@@ -269,6 +277,62 @@ pub struct TallyResponse {
     pub option_tallies: Vec<U256>,
     /// Total votes across all options.
     pub total_votes: U256,
+}
+
+// =========================================================================
+// Voter registration wire types (pre-poll commitment collection)
+// =========================================================================
+//
+// A poll's whitelist is a fixed Merkle root chosen at `createPoll` time —
+// the contract has no way to add members afterwards. So voters must submit
+// their identity commitment (`Poseidon(secret)`, never the secret itself)
+// to the relayer *before* the admin creates the next poll; the admin then
+// builds the tree from the collected commitments (client-side, so the
+// relayer never needs to hash anything) and the relayer stores the
+// resulting `(merkle_root -> commitments)` mapping so voters can later fetch
+// the leaf list needed to build their own membership proof. See
+// `crate::registration` in `viche-relayer` for the server-side store.
+
+/// Request body for `POST /api/register`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterRequest {
+    /// `Poseidon(secret)` — the voter's identity commitment. Never the
+    /// secret itself; the relayer only ever sees this one-way hash.
+    pub commitment: U256,
+}
+
+/// Response for `POST /api/register`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterResponse {
+    /// Number of commitments currently pending (not yet locked into a poll).
+    pub total_pending: usize,
+}
+
+/// A plain list of identity commitments, returned by every endpoint that
+/// hands back a leaf set: `GET /api/admin/registrations/pending`,
+/// `POST /api/admin/registrations/snapshot`, and
+/// `GET /api/polls/:id/registrations`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitmentListResponse {
+    /// Commitments in insertion order — the same order the admin's browser
+    /// must insert them into the Merkle tree to reproduce a matching root.
+    pub commitments: Vec<U256>,
+}
+
+/// Request body for `POST /api/admin/registrations/publish`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishRegistrationRequest {
+    /// The Merkle root the admin's browser computed from the most recent
+    /// `snapshot` response — becomes the lookup key for
+    /// `GET /api/polls/:id/registrations`.
+    pub merkle_root: U256,
+}
+
+/// Response for `POST /api/admin/registrations/publish`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishRegistrationResponse {
+    /// Number of commitments stored under this root.
+    pub commitment_count: usize,
 }
 
 #[cfg(test)]
@@ -361,6 +425,36 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: VoteRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn register_request_round_trips_through_json() {
+        let req = RegisterRequest {
+            commitment: U256::from(0xBEEFu64),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: RegisterRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn commitment_list_response_round_trips_through_json() {
+        let resp = CommitmentListResponse {
+            commitments: vec![U256::from(1u64), U256::from(2u64)],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: CommitmentListResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn publish_registration_request_round_trips_through_json() {
+        let req = PublishRegistrationRequest {
+            merkle_root: U256::from(0xF00Du64),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: PublishRegistrationRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(req, back);
     }
 }
