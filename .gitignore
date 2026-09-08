@@ -55,6 +55,14 @@ yarn-error.log
 !.env.example
 *.local
 
+# === Relayer runtime state ===
+# Pre-poll voter registrations (see viche-relayer::registration) -- generated
+# at runtime, never checked in, analogous to a local database file.
+crates/viche-relayer/registrations.json
+
+# === scripts/dev.ps1 output ===
+.dev-logs/
+
 
 # === OS junk ===
 .DS_Store

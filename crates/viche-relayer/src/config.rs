@@ -7,6 +7,7 @@
 use alloy::signers::local::PrivateKeySigner;
 use alloy_primitives::Address;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Startup configuration. Constructed from env vars at boot.
@@ -30,6 +31,9 @@ pub struct Config {
     pub voting_manager_address: Address,
     /// Listen address for the HTTP server.
     pub listen_addr: SocketAddr,
+    /// Path to the voter-registration store's JSON file (see
+    /// [`crate::registration`]). Created on first write if missing.
+    pub registrations_file: PathBuf,
 }
 
 impl Config {
@@ -49,6 +53,8 @@ impl Config {
     ///
     /// - `RELAYER_LISTEN_ADDR` — default `0.0.0.0`
     /// - `RELAYER_LISTEN_PORT` — default `3000`
+    /// - `REGISTRATIONS_FILE`  — default `registrations.json` (relative to
+    ///   the relayer's working directory)
     pub fn from_env() -> Result<Self, ConfigError> {
         // Load .env if present (no-op if the file doesn't exist).
         let _ = dotenvy::dotenv();
@@ -83,6 +89,10 @@ impl Config {
         let listen_addr =
             SocketAddr::from_str(&format!("{}:{}", host, port)).expect("invalid socket addr");
 
+        let registrations_file = std::env::var("REGISTRATIONS_FILE")
+            .unwrap_or_else(|_| "registrations.json".into())
+            .into();
+
         Ok(Self {
             relayer_private_key,
             admin_private_key,
@@ -90,6 +100,7 @@ impl Config {
             rpc_url,
             voting_manager_address,
             listen_addr,
+            registrations_file,
         })
     }
 }

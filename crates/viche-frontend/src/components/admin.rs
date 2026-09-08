@@ -8,9 +8,10 @@
 use leptos::*;
 use web_sys::{MouseEvent, SubmitEvent};
 
-use crate::state::{AdminTxPhase, AppSignals};
+use crate::state::{AdminTxPhase, AppSignals, WhitelistBuildPhase};
 
-/// The admin page: gate, then the create-poll form and the poll-management list.
+/// The admin page: gate, then voter registration, the create-poll form, and
+/// the poll-management list.
 #[component]
 pub fn AdminPage(#[prop(into)] signals: AppSignals) -> impl IntoView {
     let wallet = signals.wallet;
@@ -18,6 +19,23 @@ pub fn AdminPage(#[prop(into)] signals: AppSignals) -> impl IntoView {
 
     crate::actions::fetch_polls_on_mount(signals.clone());
 
+    // Shared between the registration panel (which computes it) and the
+    // create-poll form (which submits it) — lifted here so a successful
+    // whitelist build can auto-fill the form.
+    let merkle_root = create_rw_signal(String::new());
+    {
+        let wb = signals.whitelist_build;
+        create_effect(move |_| {
+            let w = wb.get();
+            if w.phase == WhitelistBuildPhase::Done {
+                if let Some(root) = w.merkle_root {
+                    merkle_root.set(root);
+                }
+            }
+        });
+    }
+
+    let registration_signals = signals.clone();
     let create_signals = signals.clone();
     let manage_signals = signals.clone();
 
@@ -43,7 +61,8 @@ pub fn AdminPage(#[prop(into)] signals: AppSignals) -> impl IntoView {
                 } else {
                     view! {
                         <div>
-                            <CreatePollForm signals=create_signals.clone() />
+                            <VoterRegistrationPanel signals=registration_signals.clone() merkle_root=merkle_root />
+                            <CreatePollForm signals=create_signals.clone() merkle_root=merkle_root />
                             <ManagePolls signals=manage_signals.clone() />
                         </div>
                     }.into_view()
@@ -53,12 +72,110 @@ pub fn AdminPage(#[prop(into)] signals: AppSignals) -> impl IntoView {
     }
 }
 
+/// Panel to close registration, build a Merkle tree from the collected
+/// commitments, and publish the resulting root — see
+/// [`crate::components::register::RegisterPage`] for the voter side.
+///
+/// Talks to the relayer's `/api/admin/registrations/*` routes, which use a
+/// *separate* credential (`ADMIN_API_KEY`) from the wallet-based gate on
+/// this page — see [`crate::actions::load_admin_api_key`].
+#[component]
+fn VoterRegistrationPanel(
+    #[prop(into)] signals: AppSignals,
+    merkle_root: RwSignal<String>,
+) -> impl IntoView {
+    let pending = signals.pending_registrations;
+    let pending_error = signals.pending_registrations_error;
+    let build = signals.whitelist_build;
+
+    let api_key = create_rw_signal(crate::actions::load_admin_api_key().unwrap_or_default());
+
+    let is_building = move || build.get().phase == WhitelistBuildPhase::Building;
+
+    view! {
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
+            <h3 class="text-sm font-medium text-slate-300 mb-4">"Voter Registration"</h3>
+
+            <label class="block text-xs text-slate-400 mb-1">"Relayer admin API key"</label>
+            <input
+                class="w-full mb-3 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm font-mono"
+                type="password"
+                placeholder="ADMIN_API_KEY"
+                prop:value=api_key
+                on:input=move |ev| {
+                    let v = event_target_value(&ev);
+                    crate::actions::save_admin_api_key(&v);
+                    api_key.set(v);
+                }
+            />
+
+            <div class="flex items-center gap-3 mb-4">
+                <button
+                    class="text-xs px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"
+                    on:click={
+                        let s = signals.clone();
+                        move |_: MouseEvent| {
+                            crate::actions::refresh_pending_registrations(s.clone(), api_key.get_untracked());
+                        }
+                    }
+                >
+                    "Refresh"
+                </button>
+                <span class="text-sm text-slate-400">
+                    {move || match (pending.get(), pending_error.get()) {
+                        (_, Some(e)) => format!("Error: {e}"),
+                        (Some(n), None) => format!("{n} commitment(s) pending"),
+                        (None, None) => "Pending count not loaded.".to_string(),
+                    }}
+                </span>
+            </div>
+
+            <button
+                class="w-full py-3 rounded-lg bg-brand-600 hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium transition"
+                disabled=is_building
+                on:click={
+                    let s = signals.clone();
+                    move |_: MouseEvent| {
+                        crate::actions::build_whitelist_from_registrations(s.clone(), api_key.get_untracked());
+                    }
+                }
+            >
+                {move || if is_building() { "Building whitelist..." } else { "Build Whitelist From Pending Registrations" }}
+            </button>
+
+            {move || {
+                let b = build.get();
+                match b.phase {
+                    WhitelistBuildPhase::Done => {
+                        let root = b.merkle_root.unwrap_or_default();
+                        let count = b.commitment_count.unwrap_or_default();
+                        view! {
+                            <div class="mt-4 p-3 rounded-lg bg-emerald-900/30 border border-emerald-800 text-emerald-200 text-sm">
+                                "Whitelist built from " {count} " voter(s). Root copied into the form below: "
+                                <span class="font-mono break-all">{root}</span>
+                            </div>
+                        }.into_view()
+                    }
+                    WhitelistBuildPhase::Failed => {
+                        let msg = b.message.unwrap_or_else(|| "Unknown error".into());
+                        view! {
+                            <div class="mt-4 p-3 rounded-lg bg-red-900/30 border border-red-800 text-red-200 text-sm">
+                                {msg}
+                            </div>
+                        }.into_view()
+                    }
+                    _ => view! { <span></span> }.into_view(),
+                }
+            }}
+        </div>
+    }
+}
+
 /// Form for `createPoll(merkleRoot, numOptions, deadline, metadataUri)`.
 #[component]
-fn CreatePollForm(#[prop(into)] signals: AppSignals) -> impl IntoView {
+fn CreatePollForm(#[prop(into)] signals: AppSignals, merkle_root: RwSignal<String>) -> impl IntoView {
     let tx = signals.admin_create;
 
-    let merkle_root = create_rw_signal(String::new());
     let num_options = create_rw_signal(String::from("2"));
     let deadline = create_rw_signal(String::new());
     let metadata_uri = create_rw_signal(String::new());
@@ -105,10 +222,10 @@ fn CreatePollForm(#[prop(into)] signals: AppSignals) -> impl IntoView {
                 on:input=move |ev| deadline.set(event_target_value(&ev))
             />
 
-            <label class="block text-xs text-slate-400 mb-1">"Metadata URI (question / option labels)"</label>
+            <label class="block text-xs text-slate-400 mb-1">"Poll question / description"</label>
             <input
                 class="w-full mb-4 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm"
-                placeholder="ipfs://... or https://..."
+                placeholder="e.g. Should we adopt proposal X? (Yes / No)"
                 prop:value=metadata_uri
                 on:input=move |ev| metadata_uri.set(event_target_value(&ev))
             />

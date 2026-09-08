@@ -40,6 +40,19 @@ use alloy::sol;
 sol! {
     #[sol(rpc)]
     interface IVotingManager {
+        // ---- events --------------------------------------------------------
+        // `metadataUri` (the poll question / option labels) is only ever
+        // written to this event, never to contract storage — `getPoll` doesn't
+        // return it. Declared here so `sol!` generates `PollCreated_filter()`
+        // on the contract instance, used by `crate::queries` to recover it.
+        event PollCreated(
+            uint256 indexed pollId,
+            bytes32 indexed merkleRoot,
+            uint256 deadline,
+            uint256 numOptions,
+            string metadataUri
+        );
+
         // ---- errors (VotingManager.sol's custom errors, verbatim) --------
         // Declared here (not just in the .sol source) purely so `sol!`
         // generates `IVotingManagerErrors` for decoding revert data — see

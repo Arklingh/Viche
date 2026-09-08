@@ -7,11 +7,11 @@
 
 use alloy_primitives::{Bytes, FixedBytes, U256};
 use leptos::{spawn_local, SignalGet, SignalSet, SignalUpdate, SignalGetUntracked};
-use viche_core::wire::{NullifierHash, Proof, VoteRequest};
+use viche_core::wire::{NullifierHash, Proof, PublishRegistrationRequest, RegisterRequest, VoteRequest};
 
 use crate::api::ApiClient;
 use crate::config::relayer_url;
-use crate::state::{AdminTxPhase, AppSignals, VotePhase};
+use crate::state::{AdminTxPhase, AppSignals, RegisterPhase, VotePhase, WhitelistBuildPhase};
 use crate::wallet::Wallet;
 
 /// Connect (or re-query) the injected wallet.
@@ -322,7 +322,7 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
         signals.secret.set(Some(secret.to_string()));
 
         // 2. Build the Merkle witness.
-        let witness = match build_witness(&secret, &poll_id, &merkle_root) {
+        let witness = match build_witness(&secret, &poll_id, &merkle_root).await {
             Ok(w) => w,
             Err(e) => {
                 signals.vote_failed(format!("Witness build failed: {}", e));
@@ -409,63 +409,82 @@ fn load_or_create_secret(address: &str) -> anyhow::Result<U256> {
     Ok(secret)
 }
 
-/// Build the Merkle witness for the voter's secret.
-///
-/// viche v1 ships with the demo whitelist from `gen_input.js` (three fixed
-/// voters). A production deployment would expose an admin endpoint returning
-/// the membership proof for a given commitment.
-fn build_witness(
-    secret: &U256,
-    poll_id: &str,
-    merkle_root: &str,
-) -> anyhow::Result<crate::proofgen::VoteWitness> {
-    use viche_core::merkle::{SparseMerkleTree, DEFAULT_DEPTH};
-    use viche_core::poseidon::PoseidonProvider;
-
+/// Get a ready circomlibjs Poseidon bridge, or an actionable error if the
+/// WASM crypto engine (loaded from `index.html`) hasn't finished loading yet.
+fn ready_poseidon() -> anyhow::Result<crate::crypto::CircomlibPoseidon> {
     let window = web_sys::window()
         .ok_or_else(|| anyhow::anyhow!("No browser window context found"))?;
-    
+
     let js_val = js_sys::Reflect::get(&window, &"__VICHE_CRYPTO_READY__".into())
         .map_err(|_| anyhow::anyhow!("Failed to search window variables"))?;
 
     // Verify the flag is set and evaluates to true
     if js_val.is_undefined() || js_val.is_null() || !js_val.as_bool().unwrap_or(false) {
         return Err(anyhow::anyhow!(
-            "Web3 Cryptographic engine is loading. Please wait 3 seconds and click vote again."
+            "Web3 Cryptographic engine is loading. Please wait 3 seconds and try again."
         ));
     }
-    
-    let poseidon = crate::crypto::CircomlibPoseidon::new()
-        .map_err(|e| anyhow::anyhow!("Crypto engine not ready: {:?}", e))?;
 
-    // The demo whitelist secrets — must match gen_input.js exactly.
-    let demo_voters: [U256; 3] = [
-        U256::from_str_radix("12345678901234567890", 10).unwrap(),
-        U256::from_str_radix("98765432109876543210", 10).unwrap(),
-        U256::from_str_radix("55555555555555555555", 10).unwrap(),
-    ];
+    crate::crypto::CircomlibPoseidon::new()
+        .map_err(|e| anyhow::anyhow!("Crypto engine not ready: {:?}", e))
+}
 
-    let mut tree: SparseMerkleTree<crate::crypto::CircomlibPoseidon, DEFAULT_DEPTH> =
-        SparseMerkleTree::new(&poseidon);
-
-    let mut voter_index: Option<u64> = None;
-    for v in &demo_voters {
-        let commitment = poseidon.hash_1(v)?;
-        let idx = tree.insert(&poseidon, commitment);
-        if v == secret {
-            voter_index = Some(idx);
-        }
+/// Insert `commitments` (already-hashed leaves, in order) into a fresh tree.
+///
+/// Shared by [`build_witness`] (a voter locating their own path) and
+/// [`build_whitelist_from_registrations`] (the admin computing a root to
+/// create the next poll with) — both must produce the *same* root from the
+/// same list, so the tree-construction logic lives in exactly one place.
+fn build_tree_from_commitments(
+    poseidon: &crate::crypto::CircomlibPoseidon,
+    commitments: &[U256],
+) -> viche_core::merkle::SparseMerkleTree<crate::crypto::CircomlibPoseidon, { viche_core::merkle::DEFAULT_DEPTH }> {
+    let mut tree = viche_core::merkle::SparseMerkleTree::new(poseidon);
+    for c in commitments {
+        tree.insert(poseidon, *c);
     }
+    tree
+}
 
-    let idx = voter_index.ok_or_else(|| {
+/// Build the Merkle witness for the voter's secret.
+///
+/// Fetches the poll's registered commitment list from the relayer (see
+/// `GET /api/polls/:id/registrations`), rebuilds the same tree the admin
+/// built when creating the poll, and locates the caller's own leaf in it —
+/// see [`register_to_vote`] for how a commitment gets into that list in the
+/// first place.
+async fn build_witness(
+    secret: &U256,
+    poll_id: &str,
+    merkle_root: &str,
+) -> anyhow::Result<crate::proofgen::VoteWitness> {
+    use viche_core::poseidon::PoseidonProvider;
+
+    let poseidon = ready_poseidon()?;
+
+    let client = ApiClient::new(relayer_url());
+    let commitments = client.fetch_poll_registrations(poll_id).await.map_err(|e| {
         anyhow::anyhow!(
-            "Voter secret not in the demo whitelist. viche v1 supports only the three demo voters."
+            "Failed to fetch this poll's registered voters from the relayer: {}",
+            e
         )
     })?;
 
-    let proof = tree.proof(idx);
+    let my_commitment = poseidon.hash_1(secret)?;
+    let idx = commitments
+        .iter()
+        .position(|c| *c == my_commitment)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Your voter secret's commitment is not in this poll's whitelist. Register on \
+                 the \"Register to Vote\" page before the admin builds the next poll."
+            )
+        })?;
 
+    let tree = build_tree_from_commitments(&poseidon, &commitments);
+    let proof = tree.proof(idx as u64);
     let root = tree.root();
+
     let on_chain = U256::from_str_radix(merkle_root.trim_start_matches("0x"), 16)
         .or_else(|_| U256::from_str_radix(merkle_root, 10))?;
     if root != on_chain {
@@ -486,6 +505,120 @@ fn build_witness(
         merkle_root: root,
         nullifier_hash: nullifier,
     })
+}
+
+/// Submit the connected wallet's identity commitment ahead of the next poll.
+///
+/// Public and permissionless — see the module doc on
+/// `viche_relayer::registration` for why this is safe to leave open. The
+/// commitment is derived from the same per-wallet secret [`build_witness`]
+/// later uses to prove membership, so registering and voting always agree
+/// on the same identity.
+pub fn register_to_vote(signals: AppSignals) {
+    use viche_core::poseidon::PoseidonProvider;
+
+    signals.register_phase(RegisterPhase::Submitting);
+
+    spawn_local(async move {
+        let wallet_addr: String = match signals.wallet.get_untracked().address.clone() {
+            Some(a) => a,
+            None => {
+                signals.register_failed("Connect your wallet first.");
+                return;
+            }
+        };
+        let secret = match load_or_create_secret(&wallet_addr) {
+            Ok(s) => s,
+            Err(e) => {
+                signals.register_failed(format!("Failed to load secret: {}", e));
+                return;
+            }
+        };
+        signals.secret.set(Some(secret.to_string()));
+
+        let poseidon = match ready_poseidon() {
+            Ok(p) => p,
+            Err(e) => {
+                signals.register_failed(e.to_string());
+                return;
+            }
+        };
+        let commitment = match poseidon.hash_1(&secret) {
+            Ok(c) => c,
+            Err(e) => {
+                signals.register_failed(format!("Failed to compute commitment: {}", e));
+                return;
+            }
+        };
+
+        let client = ApiClient::new(relayer_url());
+        match client.register(&RegisterRequest { commitment }).await {
+            Ok(resp) => signals.register_done(resp.total_pending),
+            Err(e) => signals.register_failed(format!("Relayer error: {}", e)),
+        }
+    });
+}
+
+/// Snapshot the currently-pending registrations, build a Merkle tree from
+/// them client-side, and publish the resulting root back to the relayer.
+///
+/// On success, `signals.whitelist_build`'s `merkle_root` holds the freshly
+/// computed root (0x-prefixed, 32 bytes) — the admin UI copies it into the
+/// create-poll form. Requires the relayer's `ADMIN_API_KEY` (a separate
+/// credential from the wallet-based admin gate — see [`load_admin_api_key`]).
+pub fn build_whitelist_from_registrations(signals: AppSignals, admin_api_key: String) {
+    signals.whitelist_build_phase(WhitelistBuildPhase::Building);
+
+    spawn_local(async move {
+        let poseidon = match ready_poseidon() {
+            Ok(p) => p,
+            Err(e) => {
+                signals.whitelist_build_failed(e.to_string());
+                return;
+            }
+        };
+
+        let client = ApiClient::new(relayer_url());
+        let commitments = match client.snapshot_registrations(&admin_api_key).await {
+            Ok(c) => c,
+            Err(e) => {
+                signals.whitelist_build_failed(format!("Failed to snapshot registrations: {}", e));
+                return;
+            }
+        };
+        // `snapshot` already drained the server-side pending list, so the
+        // panel's count is stale as of right now — update it locally instead
+        // of making a redundant round trip just to confirm it's zero.
+        signals.pending_registrations.set(Some(0));
+        if commitments.is_empty() {
+            signals.whitelist_build_failed("No pending registrations to build a whitelist from.");
+            return;
+        }
+
+        let tree = build_tree_from_commitments(&poseidon, &commitments);
+        let root = tree.root();
+        let root_hex = format!("0x{}", alloy_primitives::hex::encode(root.to_be_bytes::<32>()));
+
+        let publish_result = client
+            .publish_registration(&admin_api_key, &PublishRegistrationRequest { merkle_root: root })
+            .await;
+        match publish_result {
+            Ok(resp) => signals.whitelist_build_done(root_hex, resp.commitment_count),
+            Err(e) => signals.whitelist_build_failed(format!("Failed to publish whitelist: {}", e)),
+        }
+    });
+}
+
+/// Refresh the admin panel's "N registrations pending" count.
+pub fn refresh_pending_registrations(signals: AppSignals, admin_api_key: String) {
+    signals.pending_registrations_error.set(None);
+    let client = ApiClient::new(relayer_url());
+    spawn_local(async move {
+        match client.fetch_pending_registrations(&admin_api_key).await {
+            Ok(commitments) => signals.pending_registrations.set(Some(commitments.len())),
+            Err(e) => signals.pending_registrations_error.set(Some(e.to_string())),
+        }
+    });
 }
 
 /// Generate the Groth16 proof via snarkjs.
@@ -519,6 +652,25 @@ fn local_storage_set(key: &str, value: &str) -> Option<()> {
 /// Log a warning to the browser console.
 fn tracing_warn(msg: String) {
     web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&msg));
+}
+
+/// localStorage key for the admin's relayer `ADMIN_API_KEY`.
+///
+/// This is a *different* credential from the wallet-based admin gate
+/// (`is_admin`, checked against the on-chain `VotingManager.owner`): it
+/// authenticates to the relayer's `/api/admin/registrations/*` routes, which
+/// talk to the relayer's off-chain store rather than the chain. Stored only
+/// in the browser operating the admin UI, never bundled into the WASM build.
+const ADMIN_API_KEY_STORAGE_KEY: &str = "viche:admin_api_key";
+
+/// Load the previously-entered relayer admin API key, if any.
+pub fn load_admin_api_key() -> Option<String> {
+    local_storage_get(ADMIN_API_KEY_STORAGE_KEY)
+}
+
+/// Persist the relayer admin API key for next time.
+pub fn save_admin_api_key(key: &str) {
+    let _ = local_storage_set(ADMIN_API_KEY_STORAGE_KEY, key);
 }
 
 #[cfg(test)]
