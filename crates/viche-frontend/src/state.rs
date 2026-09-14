@@ -4,8 +4,10 @@
 //! for UI state; components read them reactively and write through typed
 //! actions, keeping the view macros free of business logic.
 
-use leptos::{RwSignal, SignalGet, SignalSet, SignalUpdate};
+use leptos::{RwSignal, SignalGet, SignalGetUntracked, SignalSet, SignalUpdate};
 use viche_core::wire::{PollData, TallyResponse, VoteResponse};
+
+use crate::secret::{SecretOrigin, VoterSecret};
 
 // =========================================================================
 // Wallet state
@@ -172,13 +174,86 @@ pub struct WhitelistBuildState {
 }
 
 // =========================================================================
+// Voter secret (derivation / backup / restore)
+// =========================================================================
+
+/// Everything the UI knows about the voter's secret for the connected
+/// account.
+///
+/// The secret itself is a `String` (decimal, as the circuit consumes it)
+/// rather than a `U256` so views never have to format it — and it is only
+/// ever rendered behind an explicit "reveal" toggle, because anyone who reads
+/// it off a screen can vote as this voter forever.
+#[derive(Debug, Clone, Default)]
+pub struct SecretState {
+    /// The resolved secret in decimal, or `None` if it hasn't been derived
+    /// or loaded yet this session.
+    pub value: Option<String>,
+    /// Where [`Self::value`] came from, which decides what the backup panel
+    /// warns about.
+    pub origin: Option<SecretOrigin>,
+    /// A derivation / import / migration is in flight (usually waiting on a
+    /// wallet signature prompt).
+    pub busy: bool,
+    /// A hard failure: the secret could not be resolved at all.
+    pub error: Option<String>,
+    /// A *soft* failure: the secret is usable now but could not be cached.
+    ///
+    /// This is the field that exists because the old code wrote
+    /// `let _ = local_storage_set(...)`. It is never allowed to be `Some`
+    /// without the UI rendering it.
+    pub storage_warning: Option<String>,
+    /// A transient success message ("Imported.", "Cleared.").
+    pub notice: Option<String>,
+    /// Whether the voter has asked to see the plaintext secret.
+    pub revealed: bool,
+}
+
+// =========================================================================
+// Registration review (approve / reject) lifecycle
+// =========================================================================
+
+/// Where an approve/reject submission is in its lifecycle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ReviewPhase {
+    /// Idle — nothing submitted yet.
+    #[default]
+    Idle,
+    /// POSTing to the relayer.
+    Submitting,
+    /// The relayer applied the decision.
+    Done,
+    /// Failed at some step.
+    Failed,
+}
+
+/// The state of an in-flight (or just-finished) approve/reject call.
+///
+/// Kept separate from [`WhitelistBuildState`] on purpose: review and build
+/// are two deliberate steps, and collapsing their status into one banner
+/// would blur exactly the distinction the approval gate exists to enforce.
+#[derive(Debug, Clone, Default)]
+pub struct ReviewState {
+    /// Current phase.
+    pub phase: ReviewPhase,
+    /// Human-readable status / error message.
+    pub message: Option<String>,
+    /// How many pending entries the relayer actually changed.
+    pub affected: Option<usize>,
+    /// Commitments the relayer did not recognise — surfaced rather than
+    /// swallowed, so a stale list is visible instead of half-applied.
+    pub unknown: Vec<alloy_primitives::U256>,
+}
+
+// =========================================================================
 // Page navigation
 // =========================================================================
 
 /// Which screen is currently shown.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum View {
     /// Poll list.
+    #[default]
     List,
     /// A single poll detail + vote form.
     Detail(String),
@@ -186,12 +261,6 @@ pub enum View {
     Register,
     /// Poll administration (create / close), owner-only.
     Admin,
-}
-
-impl Default for View {
-    fn default() -> Self {
-        View::List
-    }
 }
 
 // =========================================================================
@@ -214,10 +283,21 @@ pub struct AppSignals {
     pub vote: RwSignal<VoteState>,
     /// Which view is active.
     pub view: RwSignal<View>,
-    /// The voter's secret, keyed to the connected account in localStorage.
-    pub secret: RwSignal<Option<String>>,
+    /// The voter's secret for the connected account: derived from a wallet
+    /// signature, cached in `localStorage`, and backed up / restored through
+    /// [`crate::components::SecretBackupPanel`]. See [`crate::secret`] for
+    /// the derivation scheme and its tradeoffs.
+    pub secret: RwSignal<SecretState>,
     /// Whether the connected wallet is the on-chain `VotingManager` owner.
     pub is_admin: RwSignal<bool>,
+    /// The relayer's `ADMIN_API_KEY`, held **in memory only** for this page
+    /// load — never `localStorage`, never `sessionStorage`. See
+    /// [`crate::admin_key`] for why.
+    pub admin_api_key: RwSignal<Option<String>>,
+    /// Set once at startup if an older build had persisted the admin key to
+    /// web storage. The key is deleted either way; this exists to tell the
+    /// admin to rotate it, since deletion does not undo the exposure.
+    pub admin_key_was_persisted: RwSignal<bool>,
     /// State of an in-flight "create poll" transaction.
     pub admin_create: RwSignal<AdminTxState>,
     /// State of an in-flight "close poll" transaction.
@@ -231,6 +311,15 @@ pub struct AppSignals {
     pub pending_registrations: RwSignal<Option<usize>>,
     /// Error from the last pending-registrations fetch, if any.
     pub pending_registrations_error: RwSignal<Option<String>>,
+    /// The actual pending commitments most recently fetched.
+    ///
+    /// Held, not just counted, so the admin can *see* what they are about to
+    /// approve — and so the approve call can name that exact batch instead of
+    /// sending `all: true`, which would also sweep in anything that arrived
+    /// since the refresh.
+    pub pending_commitments: RwSignal<Option<Vec<alloy_primitives::U256>>>,
+    /// State of an in-flight approve/reject submission.
+    pub review: RwSignal<ReviewState>,
 }
 
 impl AppSignals {
@@ -243,14 +332,18 @@ impl AppSignals {
             current_tally: RwSignal::new(None),
             vote: RwSignal::new(VoteState::default()),
             view: RwSignal::new(View::List),
-            secret: RwSignal::new(None),
+            secret: RwSignal::new(SecretState::default()),
             is_admin: RwSignal::new(false),
+            admin_api_key: RwSignal::new(None),
+            admin_key_was_persisted: RwSignal::new(false),
             admin_create: RwSignal::new(AdminTxState::default()),
             admin_close: RwSignal::new(AdminTxState::default()),
             register: RwSignal::new(RegisterState::default()),
             whitelist_build: RwSignal::new(WhitelistBuildState::default()),
             pending_registrations: RwSignal::new(None),
             pending_registrations_error: RwSignal::new(None),
+            pending_commitments: RwSignal::new(None),
+            review: RwSignal::new(ReviewState::default()),
         }
     }
 
@@ -356,6 +449,135 @@ impl AppSignals {
             w.merkle_root = Some(merkle_root);
             w.commitment_count = Some(commitment_count);
         });
+    }
+
+    // ---- registration review --------------------------------------------
+
+    /// Move the review state to a new phase, clearing the previous result so
+    /// a stale "3 approved" can't sit next to a fresh attempt.
+    pub fn review_phase(&self, phase: ReviewPhase) {
+        self.review.update(|r| {
+            r.phase = phase;
+            r.message = None;
+            r.affected = None;
+            r.unknown.clear();
+        });
+    }
+
+    /// Record a review failure.
+    pub fn review_failed(&self, msg: impl Into<String>) {
+        self.review.update(|r| {
+            r.phase = ReviewPhase::Failed;
+            r.message = Some(msg.into());
+        });
+    }
+
+    /// Record a completed approve/reject, including the counts the relayer
+    /// reported back.
+    pub fn review_done(
+        &self,
+        msg: impl Into<String>,
+        affected: usize,
+        unknown: Vec<alloy_primitives::U256>,
+    ) {
+        self.review.update(|r| {
+            r.phase = ReviewPhase::Done;
+            r.message = Some(msg.into());
+            r.affected = Some(affected);
+            r.unknown = unknown;
+        });
+    }
+
+    // ---- voter secret ----------------------------------------------------
+
+    /// Mark a secret derivation / import / migration as in flight, clearing
+    /// stale messages so the voter doesn't read last attempt's error as this
+    /// attempt's result.
+    pub fn secret_busy(&self) {
+        self.secret.update(|s| {
+            s.busy = true;
+            s.error = None;
+            s.notice = None;
+        });
+    }
+
+    /// Record a resolved secret.
+    ///
+    /// A [`VoterSecret::storage_warning`] is copied straight into
+    /// [`SecretState::storage_warning`] so it cannot be dropped on the floor:
+    /// this is the one function that turns "the cache write failed" into
+    /// something the voter can actually see.
+    pub fn secret_resolved(&self, resolved: &VoterSecret) {
+        self.secret.update(|s| {
+            s.busy = false;
+            s.error = None;
+            s.value = Some(resolved.value.to_string());
+            s.origin = Some(resolved.origin);
+            s.storage_warning = resolved
+                .storage_warning
+                .as_ref()
+                .map(|e| e.user_message());
+        });
+    }
+
+    /// Record a hard secret failure. Leaves any previously-resolved value in
+    /// place: a failed *re-derivation* shouldn't blank out a secret the voter
+    /// can still export.
+    pub fn secret_failed(&self, msg: impl Into<String>) {
+        self.secret.update(|s| {
+            s.busy = false;
+            s.error = Some(msg.into());
+        });
+    }
+
+    /// Record a transient success message on the secret panel.
+    pub fn secret_notice(&self, msg: impl Into<String>) {
+        self.secret.update(|s| {
+            s.busy = false;
+            s.error = None;
+            s.notice = Some(msg.into());
+        });
+    }
+
+    /// Drop the in-memory copy of the secret (after an explicit "forget", or
+    /// when the account changes). Does not touch storage.
+    pub fn secret_cleared(&self) {
+        self.secret.update(|s| {
+            s.value = None;
+            s.origin = None;
+            s.revealed = false;
+            s.busy = false;
+            s.storage_warning = None;
+        });
+    }
+
+    // ---- relayer admin API key -------------------------------------------
+
+    /// Store the admin API key for this page load. Blank input clears it.
+    ///
+    /// In-memory only — see [`crate::admin_key`]. Nothing in this path writes
+    /// to `localStorage` or `sessionStorage`.
+    pub fn set_admin_api_key(&self, key: impl Into<String>) {
+        let key = key.into();
+        self.admin_api_key.set(crate::admin_key::is_usable(&key).then_some(key));
+    }
+
+    /// Forget the admin API key immediately.
+    ///
+    /// Called from the admin panel's explicit "Clear key" control and
+    /// automatically whenever the wallet disconnects or switches accounts —
+    /// a new account is a new person as far as this app can tell.
+    pub fn clear_admin_api_key(&self) {
+        self.admin_api_key.set(None);
+    }
+
+    /// The current admin key, or an empty string when none is loaded.
+    ///
+    /// Untracked on purpose: this is read inside event handlers that submit a
+    /// request, and making them reactive on the key would re-run them on
+    /// every keystroke.
+    pub fn admin_api_key_value(&self) -> String {
+        self.admin_api_key.get_untracked().unwrap_or_default()
     }
 }
 
@@ -550,6 +772,165 @@ mod tests {
         let w = signals.whitelist_build.get_untracked();
         assert_eq!(w.phase, WhitelistBuildPhase::Failed);
         assert_eq!(w.message.as_deref(), Some("no registrations to snapshot"));
+    }
+
+    // ---- voter secret ----------------------------------------------------
+
+    fn voter_secret(value: u64, origin: SecretOrigin) -> VoterSecret {
+        VoterSecret {
+            value: alloy_primitives::U256::from(value),
+            origin,
+            storage_warning: None,
+        }
+    }
+
+    #[test]
+    fn secret_starts_empty_and_hidden() {
+        let s = AppSignals::new().secret.get_untracked();
+        assert!(s.value.is_none());
+        assert!(s.origin.is_none());
+        assert!(!s.revealed);
+        assert!(!s.busy);
+    }
+
+    #[test]
+    fn secret_resolved_publishes_value_and_origin() {
+        let signals = AppSignals::new();
+        signals.secret_busy();
+        assert!(signals.secret.get_untracked().busy);
+
+        signals.secret_resolved(&voter_secret(99, SecretOrigin::WalletDerivedV1));
+        let s = signals.secret.get_untracked();
+        assert!(!s.busy);
+        assert_eq!(s.value.as_deref(), Some("99"));
+        assert_eq!(s.origin, Some(SecretOrigin::WalletDerivedV1));
+        assert!(s.storage_warning.is_none());
+    }
+
+    #[test]
+    fn secret_resolved_surfaces_a_storage_failure_instead_of_dropping_it() {
+        // The regression guard for the original `let _ = local_storage_set(..)`:
+        // a failed cache write must reach a field the UI renders.
+        let signals = AppSignals::new();
+        signals.secret_resolved(&VoterSecret {
+            value: alloy_primitives::U256::from(1u64),
+            origin: SecretOrigin::WalletDerivedV1,
+            storage_warning: Some(crate::storage::StorageError::QuotaExceeded {
+                area: "localStorage",
+            }),
+        });
+        let warning = signals
+            .secret
+            .get_untracked()
+            .storage_warning
+            .expect("storage failure was swallowed");
+        assert!(warning.contains("localStorage"), "unhelpful warning: {warning}");
+    }
+
+    #[test]
+    fn secret_failed_keeps_a_previously_resolved_value_exportable() {
+        let signals = AppSignals::new();
+        signals.secret_resolved(&voter_secret(5, SecretOrigin::LegacyRandom));
+        signals.secret_failed("wallet refused");
+
+        let s = signals.secret.get_untracked();
+        assert_eq!(s.error.as_deref(), Some("wallet refused"));
+        // Still exportable: a failed re-derivation must not blank out a
+        // secret the voter could otherwise still back up.
+        assert_eq!(s.value.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn secret_notice_clears_a_stale_error() {
+        let signals = AppSignals::new();
+        signals.secret_failed("boom");
+        signals.secret_notice("imported");
+        let s = signals.secret.get_untracked();
+        assert!(s.error.is_none());
+        assert_eq!(s.notice.as_deref(), Some("imported"));
+    }
+
+    #[test]
+    fn secret_cleared_drops_the_value_and_re_hides_the_panel() {
+        let signals = AppSignals::new();
+        signals.secret_resolved(&voter_secret(5, SecretOrigin::Imported));
+        signals.secret.update(|s| s.revealed = true);
+
+        signals.secret_cleared();
+        let s = signals.secret.get_untracked();
+        assert!(s.value.is_none());
+        assert!(s.origin.is_none());
+        assert!(!s.revealed);
+    }
+
+    // ---- registration review ---------------------------------------------
+
+    #[test]
+    fn review_starts_idle_with_no_pending_list() {
+        let signals = AppSignals::new();
+        assert_eq!(signals.review.get_untracked().phase, ReviewPhase::Idle);
+        assert!(signals.pending_commitments.get_untracked().is_none());
+    }
+
+    #[test]
+    fn review_done_records_affected_and_unknown() {
+        let signals = AppSignals::new();
+        signals.review_done("Approved 2 of 3.", 2, vec![alloy_primitives::U256::from(9u64)]);
+        let r = signals.review.get_untracked();
+        assert_eq!(r.phase, ReviewPhase::Done);
+        assert_eq!(r.affected, Some(2));
+        assert_eq!(r.unknown.len(), 1);
+        assert_eq!(r.message.as_deref(), Some("Approved 2 of 3."));
+    }
+
+    #[test]
+    fn review_phase_clears_a_stale_result() {
+        let signals = AppSignals::new();
+        signals.review_done("done", 5, vec![alloy_primitives::U256::from(1u64)]);
+        signals.review_phase(ReviewPhase::Submitting);
+
+        let r = signals.review.get_untracked();
+        assert_eq!(r.phase, ReviewPhase::Submitting);
+        assert!(r.affected.is_none());
+        assert!(r.unknown.is_empty());
+        assert!(r.message.is_none());
+    }
+
+    #[test]
+    fn review_failed_sets_phase_and_message() {
+        let signals = AppSignals::new();
+        signals.review_failed("relayer said no");
+        let r = signals.review.get_untracked();
+        assert_eq!(r.phase, ReviewPhase::Failed);
+        assert_eq!(r.message.as_deref(), Some("relayer said no"));
+    }
+
+    // ---- relayer admin API key -------------------------------------------
+
+    #[test]
+    fn admin_api_key_starts_unset() {
+        let signals = AppSignals::new();
+        assert!(signals.admin_api_key.get_untracked().is_none());
+        assert_eq!(signals.admin_api_key_value(), "");
+        assert!(!signals.admin_key_was_persisted.get_untracked());
+    }
+
+    #[test]
+    fn set_admin_api_key_treats_blank_input_as_clearing() {
+        let signals = AppSignals::new();
+        signals.set_admin_api_key("k3y");
+        assert_eq!(signals.admin_api_key_value(), "k3y");
+
+        signals.set_admin_api_key("");
+        assert!(signals.admin_api_key.get_untracked().is_none());
+    }
+
+    #[test]
+    fn clear_admin_api_key_is_idempotent() {
+        let signals = AppSignals::new();
+        signals.clear_admin_api_key();
+        signals.clear_admin_api_key();
+        assert!(signals.admin_api_key.get_untracked().is_none());
     }
 
     #[test]

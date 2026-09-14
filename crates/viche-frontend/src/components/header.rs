@@ -97,6 +97,7 @@ fn ConnectButton(#[prop(into)] signals: AppSignals) -> impl IntoView {
             let w = wallet.get();
             if w.address.is_some() {
                 let wallet_for_click = wallet;
+                let signals_for_disconnect = signals.clone();
                 view! {
                     <button
                         class="text-sm px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"
@@ -106,6 +107,13 @@ fn ConnectButton(#[prop(into)] signals: AppSignals) -> impl IntoView {
                                 w.error = None;
                             });
                             is_admin.set(false);
+                            // Disconnecting must actually drop the
+                            // credentials, not just hide the address: leaving
+                            // the admin key or the plaintext secret in memory
+                            // after an explicit disconnect is the shared-
+                            // machine case this button exists for.
+                            signals_for_disconnect.clear_admin_api_key();
+                            signals_for_disconnect.secret_cleared();
                         }
                     >
                         "Disconnect"
