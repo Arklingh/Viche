@@ -1,5 +1,22 @@
 {
+  "name": "viche",
+  "private": true,
+  "description": "Repo-root JS toolchain for the Viche frontend build (Tailwind CLI + the vendoring bundler). Not a published package.",
+  "scripts": {
+    "frontend:vendor": "node crates/viche-frontend/tools/vendor.mjs",
+    "frontend:vendor:check": "node crates/viche-frontend/tools/vendor.mjs --check",
+    "frontend:css": "node crates/viche-frontend/tools/build_css.mjs"
+  },
   "devDependencies": {
-    "cross-env": "^10.1.0"
+    "circomlibjs": "0.1.7",
+    "cross-env": "^10.1.0",
+    "esbuild": "0.25.10",
+    "snarkjs": "0.7.4",
+    "tailwindcss": "3.4.17"
+  },
+  "comments": {
+    "circomlibjs/snarkjs": "Pinned exactly, without a caret, on purpose. These are not build helpers - their bytes are vendored verbatim into crates/viche-frontend/public/vendor/ and shipped to voters' browsers, where they handle the voter's secret in cleartext. crates/viche-frontend/tools/vendor.mjs re-asserts both versions and refuses to run against a different node_modules. See public/vendor/VENDOR.md.",
+    "esbuild": "Pinned exactly because it produces one of those shipped files (the circomlibjs Poseidon bundle); a different esbuild emits different bytes and `make frontend-vendor-check` would report drift.",
+    "tailwindcss": "Pinned exactly so the generated stylesheet is reproducible. Replaces the cdn.tailwindcss.com play CDN, which shipped a runtime JIT compiler incompatible with a strict CSP."
   }
 }

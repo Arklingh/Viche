@@ -1,0 +1,39 @@
+/*
+ * Tailwind entry point for the Viche frontend.
+ *
+ * Built by `tools/build_css.mjs` (run automatically as a Trunk pre_build
+ * hook, so `trunk build` and `trunk serve` both pick it up) into
+ * `styles/tailwind.generated.css`, which is what index.html actually links.
+ * The generated file is gitignored — it is a build artifact, reproducible
+ * from this file plus `tailwind.config.js`.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  /* Subtle loading shimmer used while async data is being fetched.
+     Previously an inline <style> block in index.html; moved here so the page
+     carries no inline stylesheet and `style-src 'self'` holds for real
+     stylesheets. */
+  .viche-shimmer {
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.05) 25%,
+      rgba(255, 255, 255, 0.15) 37%,
+      rgba(255, 255, 255, 0.05) 63%
+    );
+    background-size: 400% 100%;
+    animation: viche-shimmer 1.4s ease infinite;
+  }
+
+  @keyframes viche-shimmer {
+    0% {
+      background-position: 100% 50%;
+    }
+    100% {
+      background-position: 0 50%;
+    }
+  }
+}

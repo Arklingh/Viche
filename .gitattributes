@@ -1,0 +1,18 @@
+# The vendored ZK JavaScript must round-trip byte-for-byte.
+#
+# `crates/viche-frontend/public/vendor/VENDOR.md` publishes a SHA-256 for every
+# file in that directory, and `make frontend-vendor-check` recomputes them. With
+# git's default text handling plus `core.autocrlf=true` (the Windows default),
+# a fresh clone would materialise those files with CRLF line endings, every
+# hash would differ from the published one, and the audit trail — the entire
+# point of vendoring code that handles voters' secrets — would be worthless.
+#
+# `-text` disables both eol conversion and any newline normalisation on commit.
+crates/viche-frontend/public/vendor/** -text
+
+# Same reasoning, smaller stakes: the ZK artifacts are binary.
+*.wasm binary
+*.zkey binary
+*.ptau binary
+*.r1cs binary
+*.wtns binary

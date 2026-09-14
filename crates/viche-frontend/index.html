@@ -5,6 +5,64 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Viche - Anonymous Voting</title>
 
+    <!-- =====================================================================
+         Content-Security-Policy.
+
+         This page runs the code that sees the voter's `secret` in cleartext:
+         circomlibjs derives the Poseidon commitment from it and snarkjs
+         consumes it during witness generation. Anything that can inject a
+         script here can exfiltrate that secret, which breaks ballot anonymity
+         AND lets the attacker forge a valid vote for every registered voter.
+         So the policy is `default-src 'self'` with the smallest set of
+         additions that the app actually needs. Each one is justified below.
+
+         `frame-ancestors`, `report-uri` and `sandbox` are ignored when a CSP
+         is delivered via <meta> (per spec), so they are NOT listed here — they
+         are in the reverse-proxy header set documented in
+         docs/deployment.md §4.5, which is the stronger place to enforce all of
+         this anyway. Ship both.
+
+         __VICHE_CSP_CONNECT_SRC__ below is a placeholder substituted at build
+         time by tools/postbuild.mjs from $VICHE_CSP_CONNECT_SRC, so a single
+         deployment's relayer origin is never hardcoded into the repo.
+
+           script-src 'wasm-unsafe-eval'
+               Required on Chromium for *any* WebAssembly.compile /
+               .instantiate from bytes. Three separate things need it: the
+               Leptos app's own wasm-bindgen module, the Poseidon wasm that
+               circomlibjs builds at runtime, and snarkjs's Groth16 prover.
+               Note this is NOT 'unsafe-eval' — JS eval()/new Function() stay
+               blocked.
+           worker-src / child-src blob:
+               snarkjs parallelises BN254 arithmetic across web workers that it
+               constructs from `URL.createObjectURL(new Blob([...]))`. 'self'
+               covers public/zk_worker.js; blob: covers snarkjs's own pool.
+           connect-src blob:
+               public/asset_cache.js hands proofgen.rs a blob: URL for the
+               cached vote.wasm / vote_final.zkey, and snarkjs fetch()es it.
+           style-src 'unsafe-inline'
+               One inline style attribute remains in the app
+               (components/poll_detail.rs sets the results bar width via
+               `style=format!("width: {}%", pct)`). Inline style *attributes*
+               need 'unsafe-inline' under style-src. This is the one directive
+               that is looser than it should be; it is a styling-only surface,
+               and it tightens to `style-src 'self'` the moment that attribute
+               becomes a CSS custom property.
+           img-src data:
+               inline SVG/data-URI icons in the markup.
+
+         The wallet (MetaMask and other EIP-1193 providers) is injected by a
+         browser extension content script, which runs in an isolated world and
+         is exempt from the page's CSP — confirmed against this policy, see
+         docs/deployment.md §4.5.
+         ===================================================================== -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; manifest-src 'self'; connect-src 'self' blob:__VICHE_CSP_CONNECT_SRC__"
+    />
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta name="referrer" content="no-referrer" />
+
     <!-- data-wasm-opt-params: current rustc emits bulk-memory ops and
          saturating float-to-int casts by default on wasm32 (both stable
          features); wasm-opt rejects them unless explicitly allowed, even
@@ -20,91 +78,48 @@
     <!-- data-target-path="/": without it, Trunk copies public/'s contents
          to dist/public/ (preserving the source dir name), not dist/'s root.
          Everything that references these assets — this file's own
-         `<script src="asset_cache.js">` below, and the circuit wasm/zkey
+         `<script src="asset_cache.js">` below, the `/vendor/snarkjs.min.js`
+         importScripts in public/zk_worker.js, and the circuit wasm/zkey
          URLs in actions.rs — expects them at the site root
-         (/asset_cache.js, /circuits/vote.wasm), so without this they 404
-         (silently, as an HTML fallback page — no visible error until
+         (/asset_cache.js, /vendor/*.js, /circuits/vote.wasm), so without this
+         they 404 (silently, as an HTML fallback page — no visible error until
          something tries to WebAssembly.compile() the HTML it got back). -->
     <link data-trunk rel="copy-dir" href="public" data-target-path="/" />
 
-    <!-- Tailwind via CDN. For production, run Tailwind against the markup
-         instead of shipping the runtime JIT, but the CDN is fine for a
-         small-to-medium community dApp and keeps the build pipeline simple. -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              brand: {
-                50: "#f5f3ff",
-                100: "#ede9fe",
-                200: "#ddd6fe",
-                300: "#c4b5fd",
-                400: "#a78bfa",
-                500: "#8b5cf6",
-                600: "#7c3aed",
-                700: "#6d28d9",
-                800: "#5b21b6",
-                900: "#4c1d95",
-              },
-            },
-          },
-        },
-      };
-    </script>
-    <style>
-      /* Subtle loading shimmer used while async data is being fetched. */
-      .viche-shimmer {
-        background: linear-gradient(
-          90deg,
-          rgba(255, 255, 255, 0.05) 25%,
-          rgba(255, 255, 255, 0.15) 37%,
-          rgba(255, 255, 255, 0.05) 63%
-        );
-        background-size: 400% 100%;
-        animation: viche-shimmer 1.4s ease infinite;
-      }
-      @keyframes viche-shimmer {
-        0% { background-position: 100% 50%; }
-        100% { background-position: 0 50%; }
-      }
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/snarkjs@0.7.4/build/snarkjs.min.js"></script>
+    <!-- Tailwind, pre-built. This replaces the `cdn.tailwindcss.com` play CDN
+         (a runtime JIT compiler that Tailwind documents as not-for-production,
+         and which cannot coexist with a strict CSP) plus its inline
+         `tailwind.config` block. The brand palette moved verbatim into
+         tailwind.config.js; the shimmer keyframes moved into styles/app.css.
+         The generated file is a build artifact, regenerated on every
+         `trunk build` / `trunk serve` by the pre_build hook in Trunk.toml, so
+         it cannot drift from the markup. -->
+    <link data-trunk rel="css" href="styles/tailwind.generated.css" />
+
+    <!-- Per-deployment runtime overrides (relayer URL, chain id, contract
+         address). Empty by default; see docs/deployment.md §4.3. This is a
+         file rather than an inline <script> because the CSP above forbids
+         inline scripts — an operator pasting a <script> block into index.html
+         would find it silently refused. Must come first: src/config.rs reads
+         these globals as soon as the wasm boots. -->
+    <script src="viche_env.js"></script>
+
+    <!-- The ZK stack, served same-origin from this app's own bundle.
+         Provenance + SHA-256 of every byte: public/vendor/VENDOR.md.
+         These were `https://cdn.jsdelivr.net/...` script tags with no
+         Subresource Integrity; see VENDOR.md for why that was the single most
+         dangerous thing in the frontend. Classic scripts, so they execute in
+         document order and are ready before viche_boot.js runs. -->
+    <script src="vendor/snarkjs.min.js"></script>
+    <script src="vendor/circomlibjs-poseidon.js"></script>
+
+    <!-- Cache Storage warm-up for the ~7MB circuit artifacts. -->
     <script src="asset_cache.js"></script>
-    
-    <script type="module">
-      const cryptoReady = (async () => {
-        // Load the ESM bundle of circomlibjs cleanly
-        const { buildPoseidon } = await import("https://cdn.jsdelivr.net/npm/circomlibjs@0.1.7/+esm");
-        
-        console.log("Compiling Poseidon WebAssembly...");
-        const poseidonInstance = await buildPoseidon();
-        
-        // Expose poseidon globally in all common namespaces
-        window.__VICHE_POSEIDON__ = poseidonInstance;
-        window.poseidon = poseidonInstance;
-        
-        // This makes sure any window.poseidon(...) call maps correctly to our compiled instance
-        if (typeof window.poseidon !== 'function') {
-          // If poseidon is an object with a hash function, bind it
-          window.poseidon = poseidonInstance.hash || poseidonInstance;
-        }
 
-        if (!window.snarkjs?.groth16) {
-          throw new Error("snarkjs browser bundle did not expose groth16");
-        }
-        
-        window.__VICHE_CRYPTO_READY__ = true;
-        console.log("Viche Cryptographic Engine initialized successfully!");
-      })().catch((error) => {
-        window.__VICHE_CRYPTO_READY__ = false;
-        window.__VICHE_CRYPTO_ERROR__ = String(error?.message ?? error);
-        console.error("Failed to load Viche crypto libraries:", error);
-      });
-
-      window.__VICHE_CRYPTO_PROMISE__ = cryptoReady;
-    </script>
+    <!-- Builds the Poseidon instance and publishes the window globals that
+         src/crypto.rs and src/actions.rs read. Lives in its own file rather
+         than inline so script-src can stay 'self' with no 'unsafe-inline'. -->
+    <script src="viche_boot.js"></script>
   </head>
   <body class="bg-slate-950 text-slate-100 min-h-screen">
     <!-- Leptos mounts its root component into <body> via mount_to_body. -->

@@ -21,6 +21,34 @@ address = "127.0.0.1"
 port = 8080
 open = false
 
+# ---------------------------------------------------------------------------
+# Build hooks.
+#
+# Hooks run for `trunk build` *and* `trunk serve`, which is the point: the
+# Tailwind compile and the CSP post-processing must not be steps a person can
+# forget. `command = "node"` rather than "npx"/"npm" because those are `.cmd`
+# shims on Windows that Trunk cannot spawn directly; the scripts resolve their
+# own tooling out of the repo-root node_modules.
+#
+# Trunk sets TRUNK_PROFILE (debug|release) and TRUNK_STAGING_DIR /
+# TRUNK_DIST_DIR for hooks; both scripts branch on those.
+# ---------------------------------------------------------------------------
+
+# Compile styles/app.css -> styles/tailwind.generated.css with the real
+# Tailwind CLI (the app no longer loads the runtime-JIT play CDN).
+[[hooks]]
+stage = "pre_build"
+command = "node"
+command_arguments = ["tools/build_css.mjs"]
+
+# Externalise Trunk's inline wasm loader, resolve the connect-src placeholder,
+# and refuse to emit a release bundle containing inline scripts or remote
+# asset URLs. See tools/postbuild.mjs.
+[[hooks]]
+stage = "post_build"
+command = "node"
+command_arguments = ["tools/postbuild.mjs"]
+
 # Proxy /api/* to the relayer during local development so the browser can hit
 # the relayer without CORS gymnastics. In production the relayer is exposed on
 # its own origin (or behind a reverse proxy with the right CORS headers).

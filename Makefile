@@ -26,6 +26,7 @@ FRONTEND_ZKEY_ARTIFACT := $(CIRCUITS_DIR)/build/$(CIRCUIT_NAME)_final.zkey
 .PHONY: help setup install-foundry install-circom install-snarkjs \
         circuits download-ptau verifier build-contracts test-contracts \
         proof-demo check-rs build-rs test-rs install-trunk frontend-assets \
+        frontend-deps frontend-vendor frontend-vendor-check frontend-css \
         frontend frontend-dev clean clean-circuits
 
 help: ## Show this help.
@@ -104,6 +105,18 @@ test-rs: ## cargo test --workspace
 install-trunk: ## Install the Trunk WASM bundler
 	cargo install trunk --locked
 
+frontend-deps: ## Install the JS toolchain the frontend build needs (tailwind, esbuild)
+	npm ci
+
+frontend-vendor: ## Re-vendor snarkjs/circomlibjs into public/vendor/ from the locked npm tree
+	node $(FRONTEND_DIR)/tools/vendor.mjs
+
+frontend-vendor-check: ## Fail if the committed public/vendor/ bytes drift from package-lock.json
+	node $(FRONTEND_DIR)/tools/vendor.mjs --check
+
+frontend-css: ## Build the Tailwind stylesheet (also runs automatically via Trunk's pre_build hook)
+	node $(FRONTEND_DIR)/tools/build_css.mjs
+
 frontend-assets: ## Copy circuit wasm/zkey artifacts into the Trunk public dir
 	@if not exist "$(FRONTEND_WASM_ARTIFACT)" ( \
 		echo Missing $(FRONTEND_WASM_ARTIFACT). Run 'make circuits' first. && exit 1 \
@@ -115,10 +128,19 @@ frontend-assets: ## Copy circuit wasm/zkey artifacts into the Trunk public dir
 	copy /Y $(subst /,\,$(FRONTEND_WASM_ARTIFACT)) $(subst /,\,$(FRONTEND_PUBLIC_CIRCUITS_DIR))\vote.wasm
 	copy /Y $(subst /,\,$(FRONTEND_ZKEY_ARTIFACT)) $(subst /,\,$(FRONTEND_PUBLIC_CIRCUITS_DIR))\vote_final.zkey
 
-frontend: frontend-assets ## Build the Leptos WASM bundle with Trunk
+# `frontend-deps` is a real dependency, not a convenience: the Tailwind
+# stylesheet is compiled from source now (the runtime-JIT play CDN is gone), and
+# Trunk's pre_build hook shells out to the Tailwind CLI in node_modules. Without
+# npm deps the build fails loudly rather than shipping an unstyled page.
+#
+# The Tailwind compile and the CSP post-processing are Trunk hooks (see
+# crates/viche-frontend/Trunk.toml), so they run for `trunk build` and
+# `trunk serve` alike — including when someone runs Trunk directly instead of
+# going through make.
+frontend: frontend-deps frontend-assets ## Build the Leptos WASM bundle with Trunk
 	cd $(FRONTEND_DIR) && trunk build --release
 
-frontend-dev: frontend-assets ## Serve the Leptos frontend with Trunk hot reload
+frontend-dev: frontend-deps frontend-assets ## Serve the Leptos frontend with Trunk hot reload
 	cd $(FRONTEND_DIR) && trunk serve
 
 # ---------------------------------------------------------------------------
