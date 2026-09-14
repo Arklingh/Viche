@@ -5,6 +5,19 @@ Skip it for testnet, demos, or further development — the current setup
 (public Hermez `ptau` + one automated beacon contribution, see
 [`docs/crypto.md`](crypto.md#6-trusted-setup-groth16)) is fine for that.
 
+> **This runbook cannot be automated, and nothing in this repository runs it.**
+> Its security property is 1-of-N honesty among *mutually independent humans on
+> independent machines*. A script that performed every contribution would hold
+> every participant's entropy at some point, which is precisely the thing the
+> ceremony exists to prevent — an automated "ceremony" has the security of no
+> ceremony at all, dressed up. The steps below are for people to carry out by
+> hand, and the transcript they publish is the evidence that they did.
+>
+> What *is* automated is the consequence: once a ceremony has happened, the
+> deploy script refuses to deploy any verifier you have not explicitly vouched
+> for. See
+> [Recording the verification-key hash](#recording-the-verification-key-hash).
+
 ## Why this matters
 
 Groth16's proving key encodes secret randomness ("toxic waste") from whoever
@@ -96,6 +109,90 @@ snarkjs zkey verify circuits/build/vote.r1cs final.ptau vote_final.zkey
 A ceremony nobody can independently verify provides none of the security
 benefit — publishing is not optional.
 
+## Recording the verification-key hash
+
+A ceremony only helps if the verifier that actually reaches the chain is the
+one the ceremony produced. `VotingManager.verifier` is `immutable`, so getting
+this wrong is not something you patch afterwards — it is a redeployment and a
+migration of every poll. `script/DeployVotingManager.s.sol` therefore **fails
+closed**: it will not deploy a verifier whose identity has not been explicitly
+vouched for.
+
+The value it checks is `VKEY_HASH` — the `keccak256` of the verifier's
+deployed **runtime bytecode**.
+
+### Why the runtime codehash and not the vkey constants
+
+The snarkjs-generated verifier embeds its verification key as Solidity
+`constant`s that are consumed inside an `assembly` block. There are no getters,
+and `make circuits` overwrites the whole file, so any accessors added by hand
+would be destroyed on the next build. Reading the key back out of a deployed
+instance would mean parsing bytecode at fixed offsets — brittle, and silently
+wrong if snarkjs changes its template.
+
+The runtime codehash covers those constants along with everything else, cannot
+be spoofed by a contract that merely claims to be the right verifier, and costs
+one `EXTCODEHASH`. The tradeoff, stated plainly: it also changes when the
+compiler version or optimiser settings change, even though the key did not. So
+it is a pin on the *exact artifact you reviewed* rather than on the key alone —
+the stronger property for a deploy gate, at the cost of having to regenerate
+and re-review the value whenever the build changes.
+
+### Computing it
+
+After step 1 of the cutover checklist below (i.e. with the ceremony's
+`Groth16Verifier.sol` in place and `forge build` run with the settings you will
+deploy with):
+
+```bash
+# Deployed runtime bytecode -> keccak256. `deployedBytecode.object` is the
+# runtime code, NOT `bytecode.object`, which is the creation code and hashes
+# to something different.
+cd contracts
+forge build
+cast keccak "$(jq -r '.deployedBytecode.object' \
+    out/Groth16Verifier.sol/Groth16Verifier.json)"
+```
+
+Or read it straight off a deployed instance:
+
+```bash
+cast codehash <verifier-address> --rpc-url "$RPC_URL"
+```
+
+The deploy script also prints `Verifier codehash:` on every run, including runs
+it then aborts — so a first attempt with no `VKEY_HASH` set tells you the value
+and refuses to deploy, which is the intended way to discover it.
+
+Cross-check that the number you are about to trust belongs to the ceremony's
+zkey before recording it: `snarkjs zkey export verificationkey` on the
+ceremony's `vote_final.zkey`, re-export the Solidity verifier from that same
+zkey, rebuild, and confirm you get the same codehash. If you cannot reproduce
+it from the published transcript, do not record it.
+
+### Recording it
+
+Put the value in **two** places:
+
+1. The deployment environment: `VKEY_HASH=0x...` in `contracts/.env` (or your
+   CI secret store). This is what enforces the check.
+2. The published ceremony transcript, next to the `vote_final.zkey` hash and
+   the verification key. This is what lets a third party confirm later that the
+   deployed contract corresponds to the ceremony they audited.
+
+A value recorded only in (1) is a checksum against fat-fingering. A value
+recorded in both is evidence.
+
+### The escape hatch
+
+`ALLOW_DEV_VERIFIER=true` skips the comparison entirely and prints a loud
+warning. It exists for local anvil work, where the verifier is rebuilt
+constantly and pinning a hash would be pure friction — `scripts/dev.ps1` sets it
+around its own throwaway deploy. It must never be set for a network anyone
+relies on. If a deploy fails with a mismatch, the fix is to work out *why* the
+artifact changed; copying the new hash into `VKEY_HASH` to make the error go
+away defeats the entire mechanism.
+
 ## Cutover checklist
 
 `VotingManager`'s verifier address is set once, in the constructor, and is
@@ -105,15 +202,18 @@ deployed contract. Deploying the new ceremony's output means:
 1. Regenerate `contracts/src/verifier/Groth16Verifier.sol` from the new
    `vote_final.zkey` (`make verifier`, or
    `snarkjs zkey export solidityverifier`).
-2. Deploy a **new** `VotingManager` pointing at the **new** `Groth16Verifier`
+2. Compute the new verifier's codehash and set `VKEY_HASH` — see
+   [Recording the verification-key hash](#recording-the-verification-key-hash).
+   The deploy in the next step will refuse to run without it.
+3. Deploy a **new** `VotingManager` pointing at the **new** `Groth16Verifier`
    (`forge script script/DeployVotingManager.s.sol`) — the old contract and
    any polls on it are unaffected and stay on the old (weaker) setup.
-3. Update `VOTING_MANAGER_ADDRESS` / `VERIFIER_ADDRESS` in the relayer's and
+4. Update `VOTING_MANAGER_ADDRESS` / `VERIFIER_ADDRESS` in the relayer's and
    frontend's config for the new deployment.
-4. Replace `circuits/ptau/powersOfTau28_hez_final_20.ptau` and
+5. Replace `circuits/ptau/powersOfTau28_hez_final_20.ptau` and
    `circuits/build/vote_final.zkey` with the ceremony's output, and ship the
    new `vote.wasm`/`vote_final.zkey` pair to wherever the frontend serves
    circuit assets from (`crates/viche-frontend/public/circuits/` locally;
    the CDN/object store in production — see `proofgen.rs`'s doc comment).
-5. Regenerate the demo whitelist / any test fixtures that assumed the old
+6. Regenerate the demo whitelist / any test fixtures that assumed the old
    verifying key, if applicable.

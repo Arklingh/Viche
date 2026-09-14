@@ -318,7 +318,16 @@ fn describe_known_revert(err: &ContractError) -> Option<String> {
         IVotingManagerErrors::InvalidVoteOption(_) => {
             Some("the selected option is not valid for this poll".to_string())
         }
-        IVotingManagerErrors::InvalidProof(_) => Some("the submitted proof was rejected".to_string()),
+        // `voteOption` is one of the circuit's public signals, so a
+        // proof/option mismatch surfaces here rather than as a miscount.
+        // Worth naming explicitly: it is the one InvalidProof cause a caller
+        // can actually fix, and the confusing one if they don't know the
+        // option is bound into the proof.
+        IVotingManagerErrors::InvalidProof(_) => Some(
+            "the submitted proof was rejected (it must have been generated for this exact poll, \
+             whitelist root and vote option)"
+                .to_string(),
+        ),
         // Unauthorized/InvalidDeadline/InvalidNumOptions are createPoll/
         // closePoll-only — castVote can't revert with them. Not this
         // function's job to handle (see the admin submit_* functions).

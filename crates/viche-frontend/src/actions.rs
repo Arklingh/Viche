@@ -335,7 +335,13 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
         let secret = resolved.value;
 
         // 2. Build the Merkle witness.
-        let witness = match build_witness(&secret, &poll_id, &merkle_root).await {
+        //
+        // The chosen option goes in here, not later: it is a public input of
+        // the circuit, so the proof commits to it and nobody downstream — the
+        // relayer, or a front-runner copying the proof out of the mempool —
+        // can substitute a different one.
+        let vote_option = U256::from(option as u64);
+        let witness = match build_witness(&secret, &poll_id, &merkle_root, vote_option).await {
             Ok(w) => w,
             Err(e) => {
                 signals.vote_failed(format!("Witness build failed: {}", e));
@@ -382,7 +388,10 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
 
         let req = VoteRequest {
             poll_id: poll_u256,
-            vote_option: U256::from(option as u64),
+            // Read back out of the proof's own public signals rather than from
+            // `option` again, so the submitted option is by construction the
+            // one that was proved.
+            vote_option: proof.vote_option,
             nullifier_hash: nullifier,
             proof: proof_wrapped,
         };
@@ -562,6 +571,7 @@ async fn build_witness(
     secret: &U256,
     poll_id: &str,
     merkle_root: &str,
+    vote_option: U256,
 ) -> anyhow::Result<crate::proofgen::VoteWitness> {
     use viche_core::poseidon::PoseidonProvider;
 
@@ -609,6 +619,9 @@ async fn build_witness(
         vote_id,
         merkle_root: root,
         nullifier_hash: nullifier,
+        // A public input: the proof is bound to this option, so it has to be
+        // known *before* proving rather than attached to the request after.
+        vote_option,
     })
 }
 

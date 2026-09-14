@@ -91,7 +91,13 @@ sol! {
         /// @param pollId        Target poll.
         /// @param proof         abi.encode(pA, pB, pC).
         /// @param nullifierHash Poseidon(secret, pollId).
-        /// @param voteOption    Chosen option index.
+        /// @param voteOption    Chosen option index. This is a PUBLIC SIGNAL
+        ///                      of the proof, not a free argument: the relayer
+        ///                      must forward exactly the option the voter
+        ///                      proved, or the call reverts `InvalidProof`.
+        ///                      That is deliberate — it is what stops a
+        ///                      malicious relayer (or a mempool front-runner)
+        ///                      from rewriting a ballot.
         function castVote(
             uint256 pollId,
             bytes proof,

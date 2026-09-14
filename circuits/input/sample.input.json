@@ -11,5 +11,6 @@
   ],
   "voteId": "<the on-chain pollId, reduced into the BN254 scalar field>",
   "merkleRoot": "<root of the Poseidon Merkle tree of identity commitments>",
-  "nullifierHash": "Poseidon(secret, voteId)"
+  "nullifierHash": "Poseidon(secret, voteId)",
+  "voteOption": "<index of the chosen option; a PUBLIC input, so the proof is bound to this exact option>"
 }

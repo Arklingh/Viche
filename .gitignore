@@ -37,10 +37,13 @@ circuits/node_modules/
 *.wtns
 # Keep the *.wasm prover out of git too — it is reproducible from the circuit.
 circuits/build/*.wasm
-# NOTE: contracts/src/verifier/Groth16Verifier.sol IS committed as a
-# placeholder so `forge build` works before `make circuits` runs. The real
-# generated verifier overwrites it in-place; we deliberately do NOT gitignore
-# the path so the placeholder survives a fresh checkout.
+# NOTE: contracts/src/verifier/Groth16Verifier.sol IS committed — it is a real
+# snarkjs-generated verifier, not a stub, so `forge build` and `forge test`
+# work on a fresh checkout without running `make circuits` first. `make
+# circuits` overwrites it in place with the verifier for the zkey it just
+# built, so the committed copy is only ever as trustworthy as the setup that
+# produced it (currently the dev beacon — see docs/trusted-setup-ceremony.md).
+# We deliberately do NOT gitignore the path.
 
 
 # === Node / JS ===

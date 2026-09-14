@@ -9,12 +9,12 @@
 //   4. verify                 — sanity-check against vkey.json
 //
 // The emitted `public.json` follows the circuit's public-signal order:
-//   [voteId, merkleRoot, nullifierHash]
+//   [voteId, merkleRoot, nullifierHash, voteOption]
 // and the `proof.json` has the snarkjs shape
 //   { pi_a, pi_b, pi_c, protocol, curve }.
 //
 // The relayer/frontend repack these into the Solidity ABI the
-// `Groth16Verifier.verifyProof(uint256[2],uint256[2][2],uint256[2],uint256[3])`
+// `Groth16Verifier.verifyProof(uint256[2],uint256[2][2],uint256[2],uint256[4])`
 // selector expects.
 // =============================================================================
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -80,23 +80,25 @@ async function main() {
     // 3. Emit a Solidity-ready payload so Foundry integration tests and relayers
     //    can import matching proof vectors dynamically.
     const TEST_PROOF = path.join(BUILD, "test_proof.json");
+    // snarkjs's proof JSON stores each G2 coordinate as [c0, c1]; the generated
+    // Solidity verifier's `uint[2][2] _pB` wants [c1, c0]. Swap both rows.
     const formattedTestProof = {
         pA: [proof.pi_a[0], proof.pi_a[1]],
         pB: [
             [proof.pi_b[0][1], proof.pi_b[0][0]],
-            [proof.pi_b[1][1], proof.pi_b[0][0] === proof.pi_b[1][0] ? proof.pi_b[1][0] : proof.pi_b[1][0]]
+            [proof.pi_b[1][1], proof.pi_b[1][0]]
         ],
         pC: [proof.pi_c[0], proof.pi_c[1]],
+        // Mirrors the circuit's public-signal order exactly — see vote.circom.
         voteId: publicSignals[0],
         merkleRoot: publicSignals[1],
-        nullifierHash: publicSignals[2]
+        nullifierHash: publicSignals[2],
+        voteOption: publicSignals[3]
     };
-    // Ensure pB[1] uses Y.c1 and Y.c0
-    formattedTestProof.pB[1] = [proof.pi_b[1][1], proof.pi_b[1][0]];
 
     await writeFile(TEST_PROOF, JSON.stringify(formattedTestProof, null, 2));
 
-    console.log("\n=== public signals (order: voteId, merkleRoot, nullifierHash) ===");
+    console.log("\n=== public signals (order: voteId, merkleRoot, nullifierHash, voteOption) ===");
     console.log(publicSignals);
     console.log("\n=== proof ===");
     console.log(JSON.stringify(proof, null, 2));

@@ -50,6 +50,21 @@ export ETHERSCAN_API_KEY="<your-etherscan-key>"
 export DEPLOYER_PRIVATE_KEY="0x..."   # the funded deployer EOA
 ```
 
+You also need `VKEY_HASH` — the `keccak256` of the runtime bytecode of the
+verifier you are deploying. **The script fails closed without it**, because
+`VotingManager.verifier` is immutable and a verifier built from a trusted
+setup whose toxic waste still exists lets its holder forge unlimited votes:
+
+```bash
+export VKEY_HASH="0x..."   # see docs/trusted-setup-ceremony.md
+```
+
+Running without it aborts the deploy and prints the codehash it computed, so
+a first attempt tells you the value. Do not paste that value back in
+reflexively — it is only meaningful once you know which setup produced the
+verifier. `ALLOW_DEV_VERIFIER=true` bypasses the check entirely and is for
+local anvil only; it has no legitimate use on a network in this document.
+
 Then run the existing deploy script against the named network profile:
 
 ```bash
@@ -69,7 +84,10 @@ address for both the relayer and the frontend.
 
 If you already have a verifier deployed (e.g. redeploying `VotingManager`
 without a new circuit), set `VERIFIER_ADDRESS` to skip deploying a new one —
-see the script's own doc comment.
+see the script's own doc comment. The `VKEY_HASH` check applies to that
+address too, and it is the case where it matters most: a typo'd or
+wrong-network `VERIFIER_ADDRESS` would otherwise be baked into an immutable
+field.
 
 ---
 
