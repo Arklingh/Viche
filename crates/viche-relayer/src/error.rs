@@ -44,6 +44,25 @@ pub enum RelayError {
     /// the response itself can't be used to probe the auth mechanism.
     #[error("missing or invalid admin api key")]
     Unauthorized,
+
+    /// The network's current gas price exceeds the configured ceiling, so the
+    /// transaction was **not** broadcast. Transient by nature — a client that
+    /// retries later will usually succeed.
+    #[error("{0}")]
+    GasPriceTooHigh(String),
+
+    /// The submitter failed the configured registration eligibility gate.
+    #[error("{0}")]
+    NotEligible(String),
+
+    /// A registration cap (per-source or per-batch) is already reached.
+    #[error("{0}")]
+    RegistrationCapReached(String),
+
+    /// State that the caller was told would be saved could not be written to
+    /// disk. Never reported as success — see [`crate::registration`].
+    #[error("failed to persist state: {0}")]
+    Persistence(String),
 }
 
 impl IntoResponse for RelayError {
@@ -55,6 +74,14 @@ impl IntoResponse for RelayError {
             Self::Contract(_) => (StatusCode::BAD_GATEWAY, "CONTRACT_ERROR"),
             Self::Json(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+            // 503 rather than 4xx: nothing is wrong with the request, the
+            // relayer is simply declining to spend at the current price.
+            Self::GasPriceTooHigh(_) => (StatusCode::SERVICE_UNAVAILABLE, "GAS_PRICE_TOO_HIGH"),
+            Self::NotEligible(_) => (StatusCode::FORBIDDEN, "NOT_ELIGIBLE"),
+            Self::RegistrationCapReached(_) => {
+                (StatusCode::TOO_MANY_REQUESTS, "REGISTRATION_CAP_REACHED")
+            }
+            Self::Persistence(_) => (StatusCode::INTERNAL_SERVER_ERROR, "PERSISTENCE_ERROR"),
         };
         let body = ApiError {
             code,
@@ -67,5 +94,62 @@ impl IntoResponse for RelayError {
 impl From<viche_core::wire::ValidationError> for RelayError {
     fn from(e: viche_core::wire::ValidationError) -> Self {
         Self::Validation(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    fn status_of(err: RelayError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[test]
+    fn gas_ceiling_rejections_are_retryable_503s() {
+        assert_eq!(
+            status_of(RelayError::GasPriceTooHigh("too pricey".into())),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn eligibility_failures_are_403_not_401() {
+        // 401 would imply "authenticate and try again", which is wrong: the
+        // gate is about who you are, not whether you proved it.
+        assert_eq!(
+            status_of(RelayError::NotEligible("nope".into())),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn registration_caps_report_429() {
+        assert_eq!(
+            status_of(RelayError::RegistrationCapReached("full".into())),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[test]
+    fn persistence_failures_are_server_errors() {
+        assert_eq!(
+            status_of(RelayError::Persistence("disk on fire".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn preexisting_mappings_are_unchanged() {
+        assert_eq!(
+            status_of(RelayError::Validation("bad".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(RelayError::OnChainRevert("reverted".into())),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(status_of(RelayError::Unauthorized), StatusCode::UNAUTHORIZED);
     }
 }

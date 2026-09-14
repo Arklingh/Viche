@@ -15,6 +15,78 @@ use crate::contract::IVotingManager;
 use crate::contract::IVotingManager::IVotingManagerErrors;
 use crate::error::RelayError;
 
+/// One gwei in wei. Only used to render fees in the unit humans read.
+const WEI_PER_GWEI: u128 = 1_000_000_000;
+
+/// Compare an estimated `maxFeePerGas` against the configured ceiling.
+///
+/// Returns `Err` — a *clear, client-visible* error — rather than broadcasting
+/// above the cap. The relayer's wallet is a shared, unauthenticated spend
+/// budget: without a ceiling, a gas spike (or an RPC returning a nonsense fee
+/// history) drains it in minutes, and the relayer stops being able to serve
+/// *anyone*. Declining a handful of votes during a spike is strictly better
+/// than emptying the wallet paying for them.
+///
+/// Note this checks the fee *ceiling* the fillers would set, not the actual
+/// price paid — under EIP-1559 the effective price is the base fee plus tip,
+/// which is usually well under `maxFeePerGas`. Capping the ceiling is still
+/// the right control: it is the worst case the wallet is exposed to.
+pub(crate) fn enforce_gas_ceiling(
+    estimated_max_fee_per_gas: u128,
+    ceiling_wei: u128,
+) -> Result<(), RelayError> {
+    if estimated_max_fee_per_gas > ceiling_wei {
+        return Err(RelayError::GasPriceTooHigh(format!(
+            "network gas price ({} gwei) is above the relayer's configured ceiling \
+             ({} gwei); the transaction was not broadcast. Try again later, or \
+             submit the transaction from your own wallet.",
+            format_gwei(estimated_max_fee_per_gas),
+            format_gwei(ceiling_wei),
+        )));
+    }
+    Ok(())
+}
+
+/// Render a wei fee as gwei with two decimals, for error messages.
+pub(crate) fn format_gwei(wei: u128) -> String {
+    let whole = wei / WEI_PER_GWEI;
+    let frac = (wei % WEI_PER_GWEI) * 100 / WEI_PER_GWEI;
+    format!("{whole}.{frac:02}")
+}
+
+/// Estimate the current EIP-1559 `maxFeePerGas` and check it against the
+/// ceiling.
+///
+/// A *failed estimate* does not block the transaction. The recommended
+/// fillers will make the same call when they build the transaction, and if
+/// the node cannot answer it, the send will fail with its own error — there
+/// is nothing to be gained by converting an RPC hiccup into a misleading
+/// "gas too expensive" response. The ceiling only ever rejects on a number
+/// we actually obtained.
+async fn check_gas_ceiling<P, T>(provider: &P, ceiling_wei: u128) -> Result<(), RelayError>
+where
+    P: Provider<T, Ethereum>,
+    T: Transport + Clone,
+{
+    match provider.estimate_eip1559_fees(None).await {
+        Ok(fees) => {
+            tracing::debug!(
+                max_fee_gwei = %format_gwei(fees.max_fee_per_gas),
+                ceiling_gwei = %format_gwei(ceiling_wei),
+                "checked gas ceiling"
+            );
+            enforce_gas_ceiling(fees.max_fee_per_gas, ceiling_wei)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not estimate gas fees; proceeding without a ceiling check"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Response for an admin (`createPoll`/`closePoll`) transaction.
 ///
 /// Same "broadcast and return immediately" model as [`VoteResponse`] — see
@@ -36,9 +108,11 @@ pub struct AdminTxResponse {
 ///    closed/expired/nonexistent, bad option, rejected proof) fails fast
 ///    with a 409 instead of silently burning relayer gas on a broadcast
 ///    that's going to revert anyway — see [`describe_known_revert`].
-/// 3. Broadcast via the provider (which fills gas, nonce, chain ID and signs
+/// 3. Refuse to broadcast if the current gas price is above the configured
+///    ceiling — see [`enforce_gas_ceiling`].
+/// 4. Broadcast via the provider (which fills gas, nonce, chain ID and signs
 ///    with the relayer key — all handled by the alloy fillers).
-/// 4. Return the transaction hash immediately (the relayer does NOT wait
+/// 5. Return the transaction hash immediately (the relayer does NOT wait
 ///    for inclusion, keeping latency low).
 ///
 /// # On-chain revert handling
@@ -62,6 +136,7 @@ pub async fn submit_vote<P, T>(
     nullifier_hash: &NullifierHash,
     proof: &Proof,
     vote_option: U256,
+    max_fee_per_gas_wei: u128,
 ) -> Result<VoteResponse, RelayError>
 where
     P: Provider<T, Ethereum>,
@@ -97,6 +172,9 @@ where
         );
     }
 
+    // Refuse to spend above the configured ceiling.
+    check_gas_ceiling(&provider, max_fee_per_gas_wei).await?;
+
     // Broadcast. The provider's fillers (gas, nonce, chain-id, wallet)
     // prepare the transaction before sending.
     let pending = call.send().await?;
@@ -105,6 +183,11 @@ where
     let tx_hash = pending.tx_hash();
     let tx_hash_hex = format!("{tx_hash:#x}");
 
+    // Never log the vote option, the nullifier, or anything derived from
+    // them: the tx hash and poll id are already public on-chain, but a log
+    // line pairing a choice with a timestamp (and therefore, via the proxy's
+    // access log, with an IP) is precisely the linkage this system exists to
+    // prevent.
     tracing::info!(
         poll_id = %poll_id,
         tx_hash = %tx_hash_hex,
@@ -139,6 +222,7 @@ pub async fn submit_create_poll<P, T>(
     num_options: U256,
     deadline: U256,
     metadata_uri: String,
+    max_fee_per_gas_wei: u128,
 ) -> Result<AdminTxResponse, RelayError>
 where
     P: Provider<T, Ethereum>,
@@ -146,6 +230,7 @@ where
 {
     let contract = IVotingManager::new(contract_address, &admin_provider);
     let call = contract.createPoll(merkle_root, num_options, deadline, metadata_uri);
+    check_gas_ceiling(&admin_provider, max_fee_per_gas_wei).await?;
     let pending = call.send().await?;
 
     let tx_hash = pending.tx_hash();
@@ -172,6 +257,7 @@ pub async fn submit_close_poll<P, T>(
     admin_provider: P,
     contract_address: Address,
     poll_id: U256,
+    max_fee_per_gas_wei: u128,
 ) -> Result<AdminTxResponse, RelayError>
 where
     P: Provider<T, Ethereum>,
@@ -179,6 +265,7 @@ where
 {
     let contract = IVotingManager::new(contract_address, &admin_provider);
     let call = contract.closePoll(poll_id);
+    check_gas_ceiling(&admin_provider, max_fee_per_gas_wei).await?;
     let pending = call.send().await?;
 
     let tx_hash = pending.tx_hash();
@@ -365,5 +452,54 @@ mod tests {
         // e.g. an ABI encode/decode error, unrelated to any on-chain revert.
         let err = ContractError::UnknownFunction("castVote".to_string());
         assert!(describe_known_revert(&err).is_none());
+    }
+
+    // ---- gas ceiling -----------------------------------------------------
+
+    const GWEI: u128 = 1_000_000_000;
+
+    #[test]
+    fn gas_ceiling_allows_a_price_below_the_cap() {
+        assert!(enforce_gas_ceiling(30 * GWEI, 150 * GWEI).is_ok());
+    }
+
+    #[test]
+    fn gas_ceiling_allows_a_price_exactly_at_the_cap() {
+        // The cap is the maximum acceptable price, not the first rejected
+        // one — otherwise a cap of N never permits a price of N.
+        assert!(enforce_gas_ceiling(150 * GWEI, 150 * GWEI).is_ok());
+    }
+
+    #[test]
+    fn gas_ceiling_rejects_a_price_above_the_cap() {
+        let err = enforce_gas_ceiling(150 * GWEI + 1, 150 * GWEI).unwrap_err();
+        assert!(matches!(err, RelayError::GasPriceTooHigh(_)));
+    }
+
+    #[test]
+    fn gas_ceiling_rejection_names_both_prices_in_gwei() {
+        // The message is what a voter sees; it has to be actionable.
+        let err = enforce_gas_ceiling(400 * GWEI, 150 * GWEI).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("400.00"), "got: {msg}");
+        assert!(msg.contains("150.00"), "got: {msg}");
+        assert!(msg.contains("not broadcast"), "got: {msg}");
+    }
+
+    #[test]
+    fn gas_ceiling_rejects_an_absurd_spike_without_overflowing() {
+        assert!(enforce_gas_ceiling(u128::MAX, GWEI).is_err());
+        // And formatting the absurd value must not panic.
+        let _ = format_gwei(u128::MAX);
+    }
+
+    #[test]
+    fn format_gwei_renders_whole_and_fractional_gwei() {
+        assert_eq!(format_gwei(0), "0.00");
+        assert_eq!(format_gwei(GWEI), "1.00");
+        assert_eq!(format_gwei(GWEI / 2), "0.50");
+        assert_eq!(format_gwei(25 * GWEI + GWEI / 4), "25.25");
+        // Sub-centi-gwei dust truncates rather than rounding up past the cap.
+        assert_eq!(format_gwei(1), "0.00");
     }
 }

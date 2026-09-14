@@ -45,5 +45,10 @@ url = "2"
 # transitively; pinned to match the workspace's alloy 0.3.6 resolution.
 alloy-json-rpc = "0.3.6"
 
+# `ServiceExt::oneshot` drives the assembled Router in handlers.rs's tests,
+# so the middleware stack (body caps, rate limits, security headers) is
+# exercised as it is actually layered rather than unit-tested in isolation.
+tower = { workspace = true, features = ["util"] }
+
 [lints.rust]
 unused = "allow"
