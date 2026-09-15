@@ -42,8 +42,7 @@ pub fn js_bigint_to_u256(v: &wasm_bindgen::JsValue) -> Result<U256, PoseidonErro
         // bigint.toString(10)
         let s: JsString = b
             .to_string(10)
-            .map_err(|e| PoseidonError::Bridge(format!("bigint.toString failed: {:?}", e)))?
-            .into();
+            .map_err(|e| PoseidonError::Bridge(format!("bigint.toString failed: {:?}", e)))?;
         s.into()
     } else if let Ok(s) = v.clone().dyn_into::<JsString>() {
         s.into()

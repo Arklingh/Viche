@@ -113,8 +113,18 @@ make circuits
 ```
 
 Produces `circuits/build/vote_final.zkey`, the verification key, and
-**overwrites** `contracts/src/verifier/Groth16Verifier.sol` (currently a
-permissive placeholder) with the cryptographically-sound generated verifier.
+**overwrites** `contracts/src/verifier/Groth16Verifier.sol` with the verifier
+for the key it just built.
+
+The committed copy of that file is a real snarkjs verifier, not a permissive
+stub — `forge build` and `forge test` work on a fresh checkout. But it is only
+as trustworthy as the setup that produced it, which for the committed copy is
+the dev pipeline: a public `ptau` plus a hardcoded, non-secret beacon string.
+Anyone can reproduce that toxic waste and forge votes with it. Because
+`make circuits` mints a fresh key on every run, the verifier you deploy is
+whichever one you last built — which is why `script/DeployVotingManager.s.sol`
+refuses to deploy one whose `keccak256` you have not recorded in `VKEY_HASH`.
+See [`docs/trusted-setup-ceremony.md`](docs/trusted-setup-ceremony.md).
 
 ### 4. Build & test the contracts
 
@@ -195,11 +205,23 @@ posts only `{proof, nullifier, option}` to the relayer.
 - **Cross-poll binding** — the contract pins `voteId == pollId` and
   `merkleRoot == poll root` from on-chain state when assembling the public
   inputs, so a valid proof for one poll cannot be replayed against another.
-- **Relayer trust = liveness only** — a malicious relayer can censor or
-  reorder, but cannot forge (no valid proof) or double-vote (nullifier fixed
-  by the voter's secret).
-- **Trusted setup** — the dev pipeline uses the public Hermez Powers-of-Tau.
-  **Run a fresh ceremony before mainnet.** See [`docs/crypto.md`](docs/crypto.md).
+- **Ballot binding** — the chosen option is one of the circuit's four public
+  signals (`[voteId, merkleRoot, nullifierHash, voteOption]`), so it is covered
+  by the pairing check. A proof generated for one option does not verify
+  against another. This is what stops anyone — the relayer, or a stranger
+  copying a pending proof out of the mempool — from resubmitting someone
+  else's ballot under a different option.
+- **Relayer trust = liveness only** — a malicious relayer can censor, delay or
+  reorder, but cannot forge (no valid proof), double-vote (nullifier fixed by
+  the voter's secret), or alter a ballot (see *Ballot binding* above; before
+  that binding existed, it could).
+- **Trusted setup** — the dev pipeline uses the public Hermez Powers-of-Tau
+  plus a hardcoded beacon, so its toxic waste is reproducible by anyone and a
+  holder could forge unlimited votes. **Run a fresh ceremony before mainnet**,
+  and record the resulting verifier's `VKEY_HASH` so the deploy script will
+  accept it — the script fails closed without one. See
+  [`docs/crypto.md`](docs/crypto.md) and
+  [`docs/trusted-setup-ceremony.md`](docs/trusted-setup-ceremony.md).
 
 ### Scope
 

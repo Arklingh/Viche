@@ -164,10 +164,25 @@ try {
 
         Write-Step "Deploying VotingManager..."
         $deployLog = Join-Path $LogDir "deploy.log"
-        & forge script "contracts/script/DeployVotingManager.s.sol" `
-            --rpc-url "http://127.0.0.1:8545" `
-            --broadcast `
-            --private-key $AnvilKey *> $deployLog
+
+        # The deploy script refuses to deploy a verifier whose runtime codehash
+        # hasn't been vouched for via VKEY_HASH, because the dev pipeline builds
+        # its zkey from a public ptau plus a hardcoded beacon -- anyone can
+        # reproduce that toxic waste and forge votes. This script only ever
+        # targets a throwaway local anvil, so it takes the documented escape
+        # hatch rather than pinning a hash that changes on every `make circuits`.
+        # Do NOT copy this line into anything that touches a real network.
+        $prevAllowDevVerifier = $env:ALLOW_DEV_VERIFIER
+        $env:ALLOW_DEV_VERIFIER = "true"
+        try {
+            & forge script "contracts/script/DeployVotingManager.s.sol" `
+                --rpc-url "http://127.0.0.1:8545" `
+                --broadcast `
+                --private-key $AnvilKey *> $deployLog
+        }
+        finally {
+            $env:ALLOW_DEV_VERIFIER = $prevAllowDevVerifier
+        }
 
         if ($LASTEXITCODE -ne 0) {
             Write-Host (Get-Content $deployLog -Raw)

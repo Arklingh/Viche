@@ -8,7 +8,7 @@
 use leptos::*;
 use web_sys::{MouseEvent, SubmitEvent};
 
-use crate::state::{AdminTxPhase, AppSignals, WhitelistBuildPhase};
+use crate::state::{AdminTxPhase, AppSignals, ReviewPhase, WhitelistBuildPhase};
 
 /// The admin page: gate, then voter registration, the create-poll form, and
 /// the poll-management list.
@@ -78,7 +78,12 @@ pub fn AdminPage(#[prop(into)] signals: AppSignals) -> impl IntoView {
 ///
 /// Talks to the relayer's `/api/admin/registrations/*` routes, which use a
 /// *separate* credential (`ADMIN_API_KEY`) from the wallet-based gate on
-/// this page — see [`crate::actions::load_admin_api_key`].
+/// this page.
+///
+/// That key is held **in memory only**, in `signals.admin_api_key`, and is
+/// gone on reload — see [`crate::admin_key`] for the reasoning and the
+/// options that were weighed. Practically: the field below starts empty on
+/// every page load, and nothing here writes to web storage.
 #[component]
 fn VoterRegistrationPanel(
     #[prop(into)] signals: AppSignals,
@@ -87,8 +92,14 @@ fn VoterRegistrationPanel(
     let pending = signals.pending_registrations;
     let pending_error = signals.pending_registrations_error;
     let build = signals.whitelist_build;
+    let admin_api_key = signals.admin_api_key;
+    let key_was_persisted = signals.admin_key_was_persisted;
 
-    let api_key = create_rw_signal(crate::actions::load_admin_api_key().unwrap_or_default());
+    // Backed by the app-wide signal rather than a component-local one so
+    // navigating to the poll list and back doesn't force a re-entry — the
+    // key survives as long as the page does, and no longer.
+    let key_input = move || admin_api_key.get().unwrap_or_default();
+    let has_key = move || admin_api_key.get().is_some();
 
     let is_building = move || build.get().phase == WhitelistBuildPhase::Building;
 
@@ -96,18 +107,45 @@ fn VoterRegistrationPanel(
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
             <h3 class="text-sm font-medium text-slate-300 mb-4">"Voter Registration"</h3>
 
+            {move || key_was_persisted.get().then(|| view! {
+                // Deleting the stored key does not un-expose it: it sat in
+                // localStorage, readable by any script on the origin, for an
+                // unknown length of time.
+                <div class="mb-4 p-3 rounded-lg bg-red-900/30 border border-red-800 text-red-200 text-sm">
+                    <strong class="block mb-1">"An admin API key was found in browser storage."</strong>
+                    "Older builds saved it to localStorage, where any script on this origin "
+                    "could read it. It has been deleted, but treat it as compromised and "
+                    "rotate ADMIN_API_KEY on the relayer."
+                </div>
+            })}
+
             <label class="block text-xs text-slate-400 mb-1">"Relayer admin API key"</label>
             <input
-                class="w-full mb-3 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm font-mono"
+                class="w-full mb-1 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm font-mono"
                 type="password"
+                // Browsers happily save a field named like a password; this
+                // credential should live in the admin's password manager by
+                // deliberate choice, not by autofill.
+                autocomplete="off"
                 placeholder="ADMIN_API_KEY"
-                prop:value=api_key
-                on:input=move |ev| {
-                    let v = event_target_value(&ev);
-                    crate::actions::save_admin_api_key(&v);
-                    api_key.set(v);
+                prop:value=key_input
+                on:input={
+                    let s = signals.clone();
+                    move |ev| s.set_admin_api_key(event_target_value(&ev))
                 }
             />
+            <p class="text-xs text-slate-500 mb-3">
+                {move || if has_key() {
+                    format!(
+                        "Key {} loaded for this page only - never saved to browser storage.",
+                        crate::admin_key::fingerprint(&key_input()),
+                    )
+                } else {
+                    "Kept in memory for this page only and never written to browser storage, \
+                     so it must be re-entered after a reload."
+                        .to_string()
+                }}
+            </p>
 
             <div class="flex items-center gap-3 mb-4">
                 <button
@@ -115,11 +153,22 @@ fn VoterRegistrationPanel(
                     on:click={
                         let s = signals.clone();
                         move |_: MouseEvent| {
-                            crate::actions::refresh_pending_registrations(s.clone(), api_key.get_untracked());
+                            let key = s.admin_api_key_value();
+                            crate::actions::refresh_pending_registrations(s.clone(), key);
                         }
                     }
                 >
                     "Refresh"
+                </button>
+                <button
+                    class="text-xs px-3 py-1.5 rounded-lg border border-red-800 text-red-300 hover:bg-red-900/30 disabled:opacity-40"
+                    disabled=move || !has_key()
+                    on:click={
+                        let s = signals.clone();
+                        move |_: MouseEvent| s.clear_admin_api_key()
+                    }
+                >
+                    "Clear key"
                 </button>
                 <span class="text-sm text-slate-400">
                     {move || match (pending.get(), pending_error.get()) {
@@ -130,13 +179,16 @@ fn VoterRegistrationPanel(
                 </span>
             </div>
 
+            <ReviewPanel signals=signals.clone() />
+
             <button
                 class="w-full py-3 rounded-lg bg-brand-600 hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium transition"
                 disabled=is_building
                 on:click={
                     let s = signals.clone();
                     move |_: MouseEvent| {
-                        crate::actions::build_whitelist_from_registrations(s.clone(), api_key.get_untracked());
+                        let key = s.admin_api_key_value();
+                        crate::actions::build_whitelist_from_registrations(s.clone(), key);
                     }
                 }
             >
@@ -160,6 +212,132 @@ fn VoterRegistrationPanel(
                         let msg = b.message.unwrap_or_else(|| "Unknown error".into());
                         view! {
                             <div class="mt-4 p-3 rounded-lg bg-red-900/30 border border-red-800 text-red-200 text-sm">
+                                {msg}
+                            </div>
+                        }.into_view()
+                    }
+                    _ => view! { <span></span> }.into_view(),
+                }
+            }}
+        </div>
+    }
+}
+
+/// The registration review step: look at the pending batch, then approve or
+/// reject it.
+///
+/// Deliberately a **separate control** from "Build Whitelist", and never
+/// invoked by it. `POST /api/register` is public, so the only thing standing
+/// between an attacker's scripted flood and a whitelist full of their
+/// commitments is a human looking at this list. Folding approval into the
+/// build button would restore that hole while appearing to fix a bug.
+///
+/// The list is rendered rather than merely counted for the same reason: an
+/// admin approving a number they cannot inspect is barely better than no gate
+/// at all.
+#[component]
+fn ReviewPanel(#[prop(into)] signals: AppSignals) -> impl IntoView {
+    let commitments = signals.pending_commitments;
+    let review = signals.review;
+
+    let is_submitting = move || review.get().phase == ReviewPhase::Submitting;
+
+    view! {
+        <div class="mb-4 border border-slate-800 rounded-lg p-4 bg-slate-950/40">
+            <h4 class="text-xs font-medium text-slate-300 mb-1">"Step 1 - review registrations"</h4>
+            <p class="text-xs text-slate-500 mb-3">
+                "Registration is public, so anyone can submit a commitment. Approve only a batch "
+                "you have actually looked at - the whitelist is built from approved entries, and "
+                "a poll's Merkle root cannot be amended once it is created."
+            </p>
+
+            {move || match commitments.get() {
+                None => view! {
+                    <p class="text-xs text-slate-500">
+                        "Press \"Refresh\" to load the pending registrations for review."
+                    </p>
+                }.into_view(),
+                Some(list) if list.is_empty() => view! {
+                    <p class="text-xs text-slate-500">"Nothing pending to review."</p>
+                }.into_view(),
+                Some(list) => {
+                    let count = list.len();
+                    let approve_signals = signals.clone();
+                    let reject_signals = signals.clone();
+                    view! {
+                        <div>
+                            <div class="max-h-48 overflow-y-auto rounded-lg bg-slate-900 border border-slate-800 p-2 mb-3">
+                                {list.iter().map(|c| view! {
+                                    <div class="text-[11px] font-mono text-slate-400 break-all py-0.5 border-b border-slate-800/60 last:border-0">
+                                        {format!("0x{:x}", c)}
+                                    </div>
+                                }).collect::<Vec<_>>()}
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <button
+                                    class="text-xs px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-40"
+                                    disabled=is_submitting()
+                                    on:click=move |_: MouseEvent| {
+                                        let key = approve_signals.admin_api_key_value();
+                                        crate::actions::approve_pending_registrations(
+                                            approve_signals.clone(), key,
+                                        );
+                                    }
+                                >
+                                    {move || if is_submitting() {
+                                        "Submitting...".to_string()
+                                    } else {
+                                        // Naming the count is the point: the
+                                        // admin confirms a specific batch.
+                                        format!("Approve these {count} registration(s)")
+                                    }}
+                                </button>
+                                <button
+                                    class="text-xs px-3 py-1.5 rounded-lg border border-red-800 text-red-300 hover:bg-red-900/30 disabled:opacity-40"
+                                    disabled=is_submitting()
+                                    on:click=move |_: MouseEvent| {
+                                        let key = reject_signals.admin_api_key_value();
+                                        crate::actions::reject_pending_registrations(
+                                            reject_signals.clone(), key,
+                                        );
+                                    }
+                                >
+                                    {format!("Reject all {count}")}
+                                </button>
+                            </div>
+                        </div>
+                    }.into_view()
+                }
+            }}
+
+            {move || {
+                let r = review.get();
+                match r.phase {
+                    ReviewPhase::Done => {
+                        let msg = r.message.unwrap_or_default();
+                        // `unknown` is rendered, not just counted in the
+                        // sentence, so a stale entry can be identified.
+                        let unknown = r.unknown.clone();
+                        view! {
+                            <div class="mt-3 p-3 rounded-lg bg-emerald-900/30 border border-emerald-800 text-emerald-200 text-xs">
+                                {msg}
+                                {(!unknown.is_empty()).then(|| view! {
+                                    <div class="mt-2">
+                                        <span class="block mb-1 text-amber-200">"Not recognised:"</span>
+                                        {unknown.iter().map(|c| view! {
+                                            <div class="font-mono break-all text-amber-200/80">
+                                                {format!("0x{:x}", c)}
+                                            </div>
+                                        }).collect::<Vec<_>>()}
+                                    </div>
+                                })}
+                            </div>
+                        }.into_view()
+                    }
+                    ReviewPhase::Failed => {
+                        let msg = r.message.unwrap_or_else(|| "Unknown error".into());
+                        view! {
+                            <div class="mt-3 p-3 rounded-lg bg-red-900/30 border border-red-800 text-red-200 text-xs">
                                 {msg}
                             </div>
                         }.into_view()

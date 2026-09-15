@@ -31,6 +31,11 @@ const ROOT = path.resolve(__dirname, "..");
 // ---- config ---------------------------------------------------------------
 const MERKLE_TREE_DEPTH = Number(process.env.MERKLE_TREE_DEPTH ?? 20);
 const VOTE_ID = BigInt(process.env.VOTE_ID ?? 1);
+// The chosen option index. It is a PUBLIC INPUT of the circuit, not a free
+// argument to `castVote` — a proof is bound to exactly one option, so the
+// sample witness has to pick one. Keep this in sync with the option the
+// Foundry integration tests cast (`VotingManagerIntegration.t.sol`).
+const VOTE_OPTION = BigInt(process.env.VOTE_OPTION ?? 1);
 
 // ---------------------------------------------------------------------------
 // Poseidon helper. `buildPoseidon` returns a wasm-backed instance whose
@@ -152,7 +157,7 @@ const nullifierHash = poseidon2(voterSecret, VOTE_ID);
 // circom reads inputs as decimal STRINGS for big numbers (avoids JSON
 // precision loss). Public inputs appear in the SAME ORDER declared in the
 // circuit, which is also the order the on-chain verifier expects:
-//   [voteId, merkleRoot, nullifierHash]
+//   [voteId, merkleRoot, nullifierHash, voteOption]
 const input = {
     secret: voterSecret.toString(),
     pathElements,
@@ -160,6 +165,7 @@ const input = {
     voteId: VOTE_ID.toString(),
     merkleRoot: merkleRoot.toString(),
     nullifierHash: nullifierHash.toString(),
+    voteOption: VOTE_OPTION.toString(),
 };
 
 const outDir = path.join(ROOT, "build");
@@ -171,6 +177,7 @@ console.log("Wrote:", outPath);
 console.log("  merkleRoot    :", input.merkleRoot);
 console.log("  nullifierHash :", input.nullifierHash);
 console.log("  voteId        :", input.voteId);
+console.log("  voteOption    :", input.voteOption);
 console.log("  commitments   :", commitments.map((c) => c.toString()));
 
 // Only exit when run directly (`node scripts/gen_input.js`, its documented

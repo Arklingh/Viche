@@ -91,6 +91,7 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
         const commitment = poseidon1(secret);
         const voterIndex = tree.insert(commitment);
         const voteId = 100n;
+        const voteOption = 1n;
 
         const root = tree.root();
         const { pathElements, pathIndices } = tree.proof(voterIndex);
@@ -103,6 +104,7 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
             voteId: voteId.toString(),
             merkleRoot: root.toString(),
             nullifierHash: nullifierHash.toString(),
+            voteOption: voteOption.toString(),
         };
 
         const { proof, publicSignals } = await snarkjs.groth16.fullProve(
@@ -111,9 +113,12 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
             FINAL_ZKEY
         );
 
+        // Public-signal order is part of the verifier ABI — see vote.circom.
+        assert.equal(publicSignals.length, 4, "circuit must expose exactly 4 public signals");
         assert.equal(publicSignals[0], voteId.toString());
         assert.equal(publicSignals[1], root.toString());
         assert.equal(publicSignals[2], nullifierHash.toString());
+        assert.equal(publicSignals[3], voteOption.toString());
 
         const verified = await snarkjs.groth16.verify(vkey, publicSignals, proof);
         assert.equal(verified, true, "Proof should verify cleanly");
@@ -137,6 +142,7 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
             voteId: voteId.toString(),
             merkleRoot: root.toString(),
             nullifierHash: nullifierHash.toString(),
+            voteOption: "0",
         };
 
         const { proof, publicSignals } = await snarkjs.groth16.fullProve(
@@ -171,6 +177,7 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
             voteId: voteId.toString(),
             merkleRoot: root.toString(),
             nullifierHash: nullifierHash.toString(),
+            voteOption: "2",
         };
 
         const { proof, publicSignals } = await snarkjs.groth16.fullProve(
@@ -206,6 +213,7 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
             voteId: voteId.toString(),
             merkleRoot: root.toString(),
             nullifierHash: nullifierHash.toString(),
+            voteOption: "0",
         };
 
         await assert.rejects(
@@ -217,7 +225,58 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
         );
     });
 
-    await t.test("5. Double-spend nullifier is deterministic and distinct per voteId", () => {
+    await t.test("5. Ballot binding: a proof does not verify against a different voteOption", async () => {
+        // Regression test for the ballot-malleability bug: `voteOption` used to
+        // be an unauthenticated calldata argument, so anyone watching the
+        // mempool could re-submit someone else's pending (proof, nullifier)
+        // pair under a different option. Now it is a public input, folded into
+        // the pairing check, so swapping it must break verification.
+        const tree = new MerkleTree(depth, poseidon);
+        const secret = 424242424242n;
+        const commitment = poseidon1(secret);
+        const voterIndex = tree.insert(commitment);
+        const voteId = 7n;
+        const chosenOption = 1n;
+
+        const root = tree.root();
+        const { pathElements, pathIndices } = tree.proof(voterIndex);
+        const nullifierHash = poseidon2(secret, voteId);
+
+        const input = {
+            secret: secret.toString(),
+            pathElements,
+            pathIndices,
+            voteId: voteId.toString(),
+            merkleRoot: root.toString(),
+            nullifierHash: nullifierHash.toString(),
+            voteOption: chosenOption.toString(),
+        };
+
+        const { proof, publicSignals } = await snarkjs.groth16.fullProve(
+            input,
+            WASM,
+            FINAL_ZKEY
+        );
+
+        assert.equal(
+            await snarkjs.groth16.verify(vkey, publicSignals, proof),
+            true,
+            "sanity: the honest ballot must verify"
+        );
+
+        // Same proof, same nullifier, different option — the whole attack.
+        const rewritten = [...publicSignals];
+        rewritten[3] = "2";
+        assert.notEqual(rewritten[3], publicSignals[3], "sanity: option actually changed");
+
+        assert.equal(
+            await snarkjs.groth16.verify(vkey, rewritten, proof),
+            false,
+            "A proof minted for one option must NOT verify against another"
+        );
+    });
+
+    await t.test("6. Double-spend nullifier is deterministic and distinct per voteId", () => {
         const secret = 7777777n;
         const poll1 = 1n;
         const poll2 = 2n;
@@ -232,7 +291,7 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
 });
 
 // snarkjs's WASM curve backend (built internally by groth16.fullProve/verify,
-// used in subtests 1-4 above) is a singleton cached on `globalThis.curve_bn128`
+// used in subtests 1-5 above) is a singleton cached on `globalThis.curve_bn128`
 // (see ffjavascript's buildBn128) backed by a worker_thread pool that's never
 // torn down on its own -- the event loop never empties, and `node --test`
 // hangs forever after every test above has already passed, until something
@@ -243,7 +302,7 @@ const suite = test("Viche Groth16 Circuit Test Suite", async (t) => {
 // node:test's reporter, which writes its summary asynchronously as the
 // suite promise settles -- confirmed by testing, exiting immediately (or
 // even after an awaited stdout write) truncates the printed summary before
-// all 5 subtests are reported, even though they all genuinely ran and
+// all 6 subtests are reported, even though they all genuinely ran and
 // passed. Terminating the actual worker pool instead lets the process exit
 // *naturally* once node:test's own reporter is done, so there's nothing to
 // race.

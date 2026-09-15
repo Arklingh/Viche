@@ -124,6 +124,7 @@ fn VoteForm(
     selected: leptos::RwSignal<Option<usize>>,
 ) -> impl IntoView {
     let vote = signals.vote;
+    let secret = signals.secret;
     let num: usize = u256_to_u128(num_options) as usize;
     let pid = poll_id.clone();
     let mroot = merkle_root.clone();
@@ -149,6 +150,18 @@ fn VoteForm(
     view! {
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
             <h3 class="text-sm font-medium text-slate-300 mb-4">"Cast Your Vote"</h3>
+
+            {move || secret.get().storage_warning.map(|w| view! {
+                // Voting resolves the secret, so a failed cache write shows
+                // up here the moment it happens rather than being swallowed.
+                // The vote itself still goes through: a wallet-derived secret
+                // is reproducible even when it cannot be cached.
+                <div class="mb-4 p-3 rounded-lg bg-amber-900/30 border border-amber-700 text-amber-100 text-sm">
+                    <strong class="block mb-1">"Your secret was not saved in this browser."</strong>
+                    {w}
+                    " Open \"Register to Vote\" to export it before closing this tab."
+                </div>
+            })}
 
             <div class="space-y-2 mb-6">
                 {(0..num).map(|i| {

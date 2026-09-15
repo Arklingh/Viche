@@ -12,6 +12,12 @@ pub fn App() -> impl IntoView {
     let signals = AppSignals::new();
     provide_context(signals.clone());
 
+    // Before anything renders: delete any relayer admin key an older build
+    // left in web storage. Done at the root rather than on the admin page so
+    // the cleanup happens even for a user who never opens that page — the key
+    // is equally readable to an XSS either way.
+    crate::actions::purge_legacy_admin_api_key(signals.clone());
+
     let view = signals.view;
 
     view! {

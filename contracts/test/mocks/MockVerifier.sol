@@ -19,11 +19,18 @@ contract MockVerifier is IVerifier {
         shouldAccept = v;
     }
 
+    /// @dev The `uint256[4]` public-signal array (not `[3]`) mirrors the
+    ///      circuit's four public signals — [voteId, merkleRoot,
+    ///      nullifierHash, voteOption]. The length is part of the selector, so
+    ///      this must track `IVerifier` exactly or `VotingManager` would call
+    ///      into nothing. Unit tests deliberately ignore the contents; the
+    ///      real binding of `voteOption` to the proof is exercised against the
+    ///      genuine verifier in `VotingManagerIntegration.t.sol`.
     function verifyProof(
         uint256[2] calldata,
         uint256[2][2] calldata,
         uint256[2] calldata,
-        uint256[3] calldata
+        uint256[4] calldata
     ) external view override returns (bool) {
         return shouldAccept;
     }

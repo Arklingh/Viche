@@ -102,14 +102,27 @@ snarkjs exposes public inputs in the order they are declared in the circuit,
 with **no** outputs after them. For `vote.circom`:
 
 ```
-pubSignals = [voteId, merkleRoot, nullifierHash]
+pubSignals = [voteId, merkleRoot, nullifierHash, voteOption]
 ```
 
 Every consumer — `VotingManager.castVote`, the relayer's proof packer, the
 frontend's snarkjs glue — MUST assemble the array in this exact order. The
 verifier's 4-byte selector is computed over the *whole* signature including
-the fixed-length `uint256[3]` of public inputs, so reordering or switching to
+the fixed-length `uint256[4]` of public inputs, so reordering or switching to
 a dynamic array silently breaks every call.
+
+`voteOption` is deliberately **last**. It was added after the other three, and
+appending rather than inserting means every consumer that indexes
+`publicSignals[0..2]` keeps the meaning it had; only the array widens.
+
+Note what including it buys. Being a public signal is not about privacy — the
+option is tallied in the clear either way (see §9) — it is about
+*authentication*. As a plain `castVote` argument that no proof committed to,
+the option could be rewritten by the relayer, or by any stranger who copied a
+pending `(proof, nullifier)` pair out of the mempool, resubmitted it with a
+different option at higher gas, and left the real voter's transaction
+reverting with `AlreadyVoted`. Folded into the public-input commitment, it can
+only be changed by re-proving, which needs the voter's `secret`.
 
 ---
 
@@ -158,7 +171,7 @@ carries a toxic-waste assumption shared with thousands of other projects.
 | `voteId` (= `pollId`)             | ❌       | Public; selects the poll. |
 | `merkleRoot`                      | ❌       | Public; identifies the whitelist snapshot. |
 | `nullifierHash`                   | ❌       | Public; the double-voting tag. One-way under Poseidon, so it leaks no identity. |
-| `voteOption`                      | ❌       | Submitted in the clear and tallied on-chain. |
+| `voteOption`                      | ❌       | Submitted in the clear and tallied on-chain. Public, but *authenticated* — it is a public input of the proof, so nobody but the voter can change it (see §5). |
 
 **Viche v1 makes voter identity anonymous, not vote choice.** Encrypted-choice
 voting (e.g. MACI-style) is explicitly future work.

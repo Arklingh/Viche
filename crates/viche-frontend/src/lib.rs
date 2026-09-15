@@ -30,16 +30,34 @@
 //! - [`state`] — global reactive signals.
 //! - [`api`] — relayer HTTP client (gloo-net).
 //! - [`wallet`] — EIP-1193 bridge.
+//! - [`secret`] — voter secret derivation, caching, and backup/restore.
+//! - [`admin_key`] — in-memory handling of the relayer's `ADMIN_API_KEY`.
+//! - [`storage`] — `localStorage`/`sessionStorage` access that reports failures.
 //! - [`crypto`] — circomlibjs Poseidon provider.
 //! - [`onchain`] — admin calldata encoding for direct wallet transactions.
 //! - [`proofgen`] — snarkjs proof generation.
 //! - [`components`] — Leptos view components.
 //! - [`config`] — runtime URL configuration.
 //! - [`js_helpers`] — U256 ↔ JS bigint conversions.
+//!
+//! ## Credential handling
+//!
+//! Two secrets pass through this crate and they are handled differently on
+//! purpose:
+//!
+//! * The **voter's secret** is derived from a wallet signature and cached in
+//!   `localStorage`. It must survive a reload (a voter who has to re-sign on
+//!   every page load will not vote), and it is scoped to one account.
+//! * The **relayer admin key** is held in memory for a single page load and
+//!   written nowhere. It grants control over a poll's whitelist, it is used a
+//!   handful of times per poll, and re-entering it costs the admin seconds.
+//!
+//! Neither is ever logged, put in a URL, or sent anywhere but the relayer.
 
 #![forbid(unsafe_code)]
 
 pub mod actions;
+pub mod admin_key;
 pub mod api;
 pub mod app;
 pub mod components;
@@ -48,7 +66,9 @@ pub mod crypto;
 pub mod js_helpers;
 pub mod onchain;
 pub mod proofgen;
+pub mod secret;
 pub mod state;
+pub mod storage;
 #[cfg(test)]
 mod test_support;
 pub mod wallet;

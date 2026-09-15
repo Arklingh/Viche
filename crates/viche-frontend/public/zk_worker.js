@@ -3,7 +3,14 @@
 // Running snarkjs.groth16.fullProve inside a Web Worker prevents UI thread
 // stutter and frame drops during heavy witness calculation & BN254 arithmetic.
 
-importScripts("https://cdn.jsdelivr.net/npm/snarkjs@0.7.4/build/snarkjs.min.js");
+// snarkjs is loaded same-origin from the app's own bundle, never from a CDN:
+// this worker runs `fullProve`, which consumes the voter's `secret` during
+// witness generation, so the bytes doing that have to be bytes we shipped.
+// See `public/vendor/VENDOR.md` for provenance and hashes. The leading "/" is
+// deliberate — Trunk copies `public/` to the site root (see the
+// `data-target-path="/"` comment in index.html), and this worker may be
+// constructed from any route.
+importScripts("/vendor/snarkjs.min.js");
 
 self.onmessage = async (event) => {
     const { id, type, payload } = event.data;

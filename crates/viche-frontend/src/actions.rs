@@ -44,6 +44,13 @@ pub fn connect_wallet(signals: AppSignals) {
                 .on_accounts_changed(move |accts| {
                     let new_addr: Option<String> = accts.into_iter().next();
                     s.wallet.update(|w| w.address = new_addr);
+                    // A different account is, as far as this app can tell, a
+                    // different person: drop both credentials rather than let
+                    // the new account inherit the old one's secret or admin
+                    // key. The secret is only dropped from memory — it stays
+                    // cached under its own address key.
+                    s.secret_cleared();
+                    s.clear_admin_api_key();
                     check_admin(s.clone());
                 })
                 .leak();
@@ -304,7 +311,8 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
     signals.vote_phase(VotePhase::Witness);
 
     spawn_local(async move {
-        // 1. Resolve the voter's secret (per-account, in localStorage).
+        // 1. Resolve the voter's secret: cached per account, otherwise
+        //    derived from a wallet signature (see `crate::secret`).
         let wallet_addr: String = match signals.wallet.get_untracked().address.clone() {
             Some(a) => a,
             None => {
@@ -312,17 +320,28 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
                 return;
             }
         };
-        let secret = match load_or_create_secret(&wallet_addr) {
+        let resolved = match crate::secret::resolve(&wallet_addr).await {
             Ok(s) => s,
             Err(e) => {
-                signals.vote_failed(format!("Failed to load secret: {}", e));
+                signals.vote_failed(e.user_message());
                 return;
             }
         };
-        signals.secret.set(Some(secret.to_string()));
+        // Publishes any storage warning into `signals.secret`, which the vote
+        // form renders as a banner. A warning here is never fatal: a
+        // wallet-derived secret is reproducible even if it could not be
+        // cached, which is the whole reason derivation replaced randomness.
+        signals.secret_resolved(&resolved);
+        let secret = resolved.value;
 
         // 2. Build the Merkle witness.
-        let witness = match build_witness(&secret, &poll_id, &merkle_root).await {
+        //
+        // The chosen option goes in here, not later: it is a public input of
+        // the circuit, so the proof commits to it and nobody downstream — the
+        // relayer, or a front-runner copying the proof out of the mempool —
+        // can substitute a different one.
+        let vote_option = U256::from(option as u64);
+        let witness = match build_witness(&secret, &poll_id, &merkle_root, vote_option).await {
             Ok(w) => w,
             Err(e) => {
                 signals.vote_failed(format!("Witness build failed: {}", e));
@@ -369,7 +388,10 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
 
         let req = VoteRequest {
             poll_id: poll_u256,
-            vote_option: U256::from(option as u64),
+            // Read back out of the proof's own public signals rather than from
+            // `option` again, so the submitted option is by construction the
+            // one that was proved.
+            vote_option: proof.vote_option,
             nullifier_hash: nullifier,
             proof: proof_wrapped,
         };
@@ -387,27 +409,119 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
     });
 }
 
-// ---- helpers ------------------------------------------------------------
+// ---- voter secret actions -----------------------------------------------
 
-/// Load the voter's secret from localStorage, keyed by their address. If none
-/// exists, generate one and persist it.
-fn load_or_create_secret(address: &str) -> anyhow::Result<U256> {
-    let key = format!("viche:secret:{}", address);
-
-    if let Some(stored) = local_storage_get(&key) {
-        if let Ok(v) = U256::from_str_radix(stored.trim(), 10) {
-            return Ok(v);
+/// Resolve the connected account's secret into `signals.secret`, prompting
+/// for the derivation signature if it isn't cached yet.
+///
+/// Used by the backup panel so a voter can look at (and export) their secret
+/// without first having to start a registration or a vote.
+pub fn load_secret(signals: AppSignals) {
+    let Some(address) = signals.wallet.get_untracked().address.clone() else {
+        signals.secret_failed("Connect your wallet first.");
+        return;
+    };
+    signals.secret_busy();
+    spawn_local(async move {
+        match crate::secret::resolve(&address).await {
+            Ok(resolved) => signals.secret_resolved(&resolved),
+            Err(e) => signals.secret_failed(e.user_message()),
         }
-    }
-
-    // Generate a fresh random field element via Web Crypto (through getrandom).
-    let mut buf = [0u8; 32];
-    getrandom::getrandom(&mut buf).map_err(|e| anyhow::anyhow!("rng failed: {}", e))?;
-    let raw = U256::from_be_bytes(buf);
-    let secret = viche_core::field::reduce(&raw);
-    let _ = local_storage_set(&key, &secret.to_string());
-    Ok(secret)
+    });
 }
+
+/// Replace a legacy-random or imported secret with the wallet-derived one.
+///
+/// Destructive by design: it changes `Poseidon(secret)`, so any commitment
+/// already registered under the old value stops matching. The panel that
+/// calls this must have told the voter they will need to register again.
+pub fn migrate_secret_to_wallet_derived(signals: AppSignals) {
+    let Some(address) = signals.wallet.get_untracked().address.clone() else {
+        signals.secret_failed("Connect your wallet first.");
+        return;
+    };
+    signals.secret_busy();
+    spawn_local(async move {
+        match crate::secret::migrate_to_wallet_derived(&address).await {
+            Ok(resolved) => {
+                // Order matters: `secret_resolved` publishes the new value
+                // and provenance, `secret_notice` then adds the message
+                // without disturbing either.
+                signals.secret_resolved(&resolved);
+                signals.secret_notice(
+                    "Switched to a wallet-derived secret. Your commitment has changed, so \
+                     register again before the next poll is built.",
+                );
+            }
+            Err(e) => signals.secret_failed(e.user_message()),
+        }
+    });
+}
+
+/// Restore a secret the voter pasted into the import box.
+///
+/// Synchronous: parsing and storing need neither the wallet nor the network,
+/// so a bad paste is rejected instantly instead of after a signature prompt.
+pub fn import_secret(signals: AppSignals, pasted: String) {
+    let Some(address) = signals.wallet.get_untracked().address.clone() else {
+        signals.secret_failed("Connect your wallet first.");
+        return;
+    };
+
+    let parsed = match crate::secret::parse_backup(&pasted) {
+        Ok(p) => p,
+        Err(e) => {
+            signals.secret_failed(e.user_message());
+            return;
+        }
+    };
+
+    // Importing a backup taken from a *different* account is legitimate (it
+    // is how you move an identity to a new wallet) but it is also exactly
+    // what a mis-paste looks like, so say so rather than silently accepting.
+    let cross_account = parsed
+        .address
+        .as_deref()
+        .filter(|backup_addr| !backup_addr.eq_ignore_ascii_case(&address))
+        .map(|backup_addr| {
+            format!(
+                " Note: this backup was exported for {}, not the connected account.",
+                crate::secret::short_address(backup_addr)
+            )
+        })
+        .unwrap_or_default();
+
+    match crate::secret::import(&address, parsed.secret) {
+        Ok(resolved) => {
+            signals.secret_resolved(&resolved);
+            signals.secret_notice(format!(
+                "Secret restored and cached for this account.{cross_account} Make sure its \
+                 commitment is registered before you try to vote."
+            ));
+        }
+        Err(e) => signals.secret_failed(e.user_message()),
+    }
+}
+
+/// Delete the cached secret for the connected account.
+pub fn forget_secret(signals: AppSignals) {
+    let Some(address) = signals.wallet.get_untracked().address.clone() else {
+        signals.secret_failed("Connect your wallet first.");
+        return;
+    };
+    match crate::secret::forget(&address) {
+        Ok(()) => {
+            signals.secret_cleared();
+            signals.secret_notice(
+                "Cached secret deleted from this browser. A wallet-derived secret comes back \
+                 with one signature; anything else is now only in your backup.",
+            );
+        }
+        Err(e) => signals.secret_failed(e.user_message()),
+    }
+}
+
+// ---- helpers ------------------------------------------------------------
 
 /// Get a ready circomlibjs Poseidon bridge, or an actionable error if the
 /// WASM crypto engine (loaded from `index.html`) hasn't finished loading yet.
@@ -457,6 +571,7 @@ async fn build_witness(
     secret: &U256,
     poll_id: &str,
     merkle_root: &str,
+    vote_option: U256,
 ) -> anyhow::Result<crate::proofgen::VoteWitness> {
     use viche_core::poseidon::PoseidonProvider;
 
@@ -504,6 +619,9 @@ async fn build_witness(
         vote_id,
         merkle_root: root,
         nullifier_hash: nullifier,
+        // A public input: the proof is bound to this option, so it has to be
+        // known *before* proving rather than attached to the request after.
+        vote_option,
     })
 }
 
@@ -527,14 +645,15 @@ pub fn register_to_vote(signals: AppSignals) {
                 return;
             }
         };
-        let secret = match load_or_create_secret(&wallet_addr) {
+        let resolved = match crate::secret::resolve(&wallet_addr).await {
             Ok(s) => s,
             Err(e) => {
-                signals.register_failed(format!("Failed to load secret: {}", e));
+                signals.register_failed(e.user_message());
                 return;
             }
         };
-        signals.secret.set(Some(secret.to_string()));
+        signals.secret_resolved(&resolved);
+        let secret = resolved.value;
 
         let poseidon = match ready_poseidon() {
             Ok(p) => p,
@@ -565,9 +684,19 @@ pub fn register_to_vote(signals: AppSignals) {
 /// On success, `signals.whitelist_build`'s `merkle_root` holds the freshly
 /// computed root (0x-prefixed, 32 bytes) — the admin UI copies it into the
 /// create-poll form. Requires the relayer's `ADMIN_API_KEY` (a separate
-/// credential from the wallet-based admin gate — see [`load_admin_api_key`]).
+/// credential from the wallet-based admin gate — see [`crate::admin_key`]),
+/// passed in from the in-memory session signal rather than read from storage.
 pub fn build_whitelist_from_registrations(signals: AppSignals, admin_api_key: String) {
     signals.whitelist_build_phase(WhitelistBuildPhase::Building);
+
+    if !crate::admin_key::is_usable(&admin_api_key) {
+        // Fail here rather than send an empty bearer token: the relayer
+        // would answer 401 and the admin would be left guessing whether the
+        // key is wrong or simply absent after a page reload (which now drops
+        // it by design).
+        signals.whitelist_build_failed(ADMIN_KEY_MISSING);
+        return;
+    }
 
     spawn_local(async move {
         let poseidon = match ready_poseidon() {
@@ -581,15 +710,29 @@ pub fn build_whitelist_from_registrations(signals: AppSignals, admin_api_key: St
         let client = ApiClient::new(relayer_url());
         let commitments = match client.snapshot_registrations(&admin_api_key).await {
             Ok(c) => c,
-            Err(e) => {
+            // The relayer refuses to drain a non-empty batch with nothing
+            // approved, because an empty whitelist means a poll nobody can
+            // vote in. Point the admin at the review step rather than showing
+            // them a raw HTTP error for a routine, fixable situation.
+            Err(crate::api::SnapshotFailure::NothingApproved(detail)) => {
+                signals.whitelist_build_failed(nothing_approved_message(
+                    signals.pending_registrations.get_untracked(),
+                    &detail,
+                ));
+                return;
+            }
+            Err(crate::api::SnapshotFailure::Other(e)) => {
                 signals.whitelist_build_failed(format!("Failed to snapshot registrations: {}", e));
                 return;
             }
         };
         // `snapshot` already drained the server-side pending list, so the
         // panel's count is stale as of right now — update it locally instead
-        // of making a redundant round trip just to confirm it's zero.
+        // of making a redundant round trip just to confirm it's zero. The
+        // reviewed list goes with it: leaving it on screen would invite the
+        // admin to "approve" entries that no longer exist.
         signals.pending_registrations.set(Some(0));
+        signals.pending_commitments.set(Some(Vec::new()));
         if commitments.is_empty() {
             signals.whitelist_build_failed("No pending registrations to build a whitelist from.");
             return;
@@ -609,16 +752,179 @@ pub fn build_whitelist_from_registrations(signals: AppSignals, admin_api_key: St
     });
 }
 
-/// Refresh the admin panel's "N registrations pending" count.
+/// Shown whenever an admin action runs without a key loaded — which is the
+/// normal state after a page reload, now that the key is never persisted.
+const ADMIN_KEY_MISSING: &str =
+    "Enter the relayer admin API key first. It is kept in memory for this page only and is \
+     never written to browser storage, so it has to be re-entered after a reload.";
+
+/// Compose the message shown when a snapshot is refused for want of
+/// approvals.
+///
+/// Pure so the wording is unit-testable without a relayer. Falls back to the
+/// relayer's own text when the pending count isn't known, rather than
+/// asserting a number it can't back up.
+fn nothing_approved_message(pending: Option<usize>, detail: &str) -> String {
+    match pending {
+        Some(n) if n > 0 => format!(
+            "None of the {n} pending registration(s) have been approved yet. Review the list \
+             above and approve the ones you recognise, then build the whitelist. (Relayer: {detail})"
+        ),
+        _ => format!(
+            "The relayer has no approved registrations to snapshot. Refresh the pending list, \
+             review it, and approve before building the whitelist. (Relayer: {detail})"
+        ),
+    }
+}
+
+/// Refresh the admin panel's pending registration list (and its count).
+///
+/// Fetches the commitments themselves, not just a number: the approval step
+/// is only meaningful if the admin can see what they are approving.
 pub fn refresh_pending_registrations(signals: AppSignals, admin_api_key: String) {
     signals.pending_registrations_error.set(None);
+    if !crate::admin_key::is_usable(&admin_api_key) {
+        signals
+            .pending_registrations_error
+            .set(Some(ADMIN_KEY_MISSING.to_string()));
+        return;
+    }
     let client = ApiClient::new(relayer_url());
     spawn_local(async move {
         match client.fetch_pending_registrations(&admin_api_key).await {
-            Ok(commitments) => signals.pending_registrations.set(Some(commitments.len())),
+            Ok(commitments) => {
+                signals.pending_registrations.set(Some(commitments.len()));
+                signals.pending_commitments.set(Some(commitments));
+            }
             Err(e) => signals.pending_registrations_error.set(Some(e.to_string())),
         }
     });
+}
+
+/// Approve the pending registrations currently on screen.
+///
+/// A **separate, deliberate step** from building the whitelist, and never
+/// called from it. `POST /api/register` is public, so without a human saying
+/// "I have reviewed this list" an attacker can flood the pending batch and a
+/// blind snapshot would hand them the electorate.
+///
+/// Sends the exact commitments the admin is looking at rather than
+/// `all: true`. That closes the window between the refresh and the click: a
+/// registration that arrived in between is not swept in unreviewed, and if
+/// the list has drifted the relayer reports the difference in `unknown`.
+pub fn approve_pending_registrations(signals: AppSignals, admin_api_key: String) {
+    submit_review(signals, admin_api_key, ReviewAction::Approve);
+}
+
+/// Reject (drop) the pending registrations currently on screen.
+///
+/// The other half of a usable review step: without it a Sybil batch stays
+/// pending forever and every later review has to scroll past it.
+pub fn reject_pending_registrations(signals: AppSignals, admin_api_key: String) {
+    submit_review(signals, admin_api_key, ReviewAction::Reject);
+}
+
+/// Which review decision [`submit_review`] is applying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewAction {
+    Approve,
+    Reject,
+}
+
+impl ReviewAction {
+    /// Past-tense verb for the result banner.
+    fn past_tense(self) -> &'static str {
+        match self {
+            ReviewAction::Approve => "Approved",
+            ReviewAction::Reject => "Rejected",
+        }
+    }
+}
+
+/// Shared body of approve/reject: same guards, same request, same reporting.
+fn submit_review(signals: AppSignals, admin_api_key: String, action: ReviewAction) {
+    signals.review_phase(crate::state::ReviewPhase::Submitting);
+
+    if !crate::admin_key::is_usable(&admin_api_key) {
+        signals.review_failed(ADMIN_KEY_MISSING);
+        return;
+    }
+
+    // Only ever act on a list the admin has actually loaded. Approving
+    // something never displayed is the rubber-stamp this gate exists to
+    // prevent.
+    let commitments = match signals.pending_commitments.get_untracked() {
+        Some(c) if !c.is_empty() => c,
+        Some(_) => {
+            signals.review_failed(
+                "There are no pending registrations to act on. Refresh the list first.",
+            );
+            return;
+        }
+        None => {
+            signals.review_failed(
+                "Load the pending registrations first so you can review them before deciding.",
+            );
+            return;
+        }
+    };
+
+    let requested = commitments.len();
+    let req = crate::api::ReviewRegistrationsRequest {
+        commitments,
+        all: false,
+    };
+
+    spawn_local(async move {
+        let client = ApiClient::new(relayer_url());
+        let result = match action {
+            ReviewAction::Approve => client.approve_registrations(&admin_api_key, &req).await,
+            ReviewAction::Reject => client.reject_registrations(&admin_api_key, &req).await,
+        };
+
+        match result {
+            Ok(resp) => {
+                signals.review_done(
+                    review_summary(action, requested, &resp),
+                    resp.affected,
+                    resp.unknown.clone(),
+                );
+                signals.pending_registrations.set(Some(resp.total_pending));
+                // The server-side batch moved under us; force a re-read
+                // rather than leaving a list that no longer reflects it.
+                signals.pending_commitments.set(None);
+            }
+            Err(e) => signals.review_failed(format!("Relayer error: {}", e)),
+        }
+    });
+}
+
+/// Build the human summary of a completed review.
+///
+/// Pure, so the arithmetic that tells an admin "2 of the 5 you sent were not
+/// recognised" is testable without a relayer.
+fn review_summary(
+    action: ReviewAction,
+    requested: usize,
+    resp: &crate::api::ReviewRegistrationsResponse,
+) -> String {
+    let mut msg = format!(
+        "{} {} of {} submitted registration(s). {} still pending.",
+        action.past_tense(),
+        resp.affected,
+        requested,
+        resp.total_pending
+    );
+    if !resp.unknown.is_empty() {
+        // Never swallowed: an unrecognised entry means the list went stale
+        // (or was mistyped), and silently applying the rest would hide that.
+        msg.push_str(&format!(
+            " {} were not recognised by the relayer - refresh the list and check before \
+             building the whitelist.",
+            resp.unknown.len()
+        ));
+    }
+    msg
 }
 
 /// Generate the Groth16 proof via snarkjs.
@@ -632,45 +938,27 @@ async fn generate_proof(
     gen.prove(&witness).await
 }
 
-// ---- WASM storage + logging shims --------------------------------------
-
-/// `localStorage.getItem(key)`.
-fn local_storage_get(key: &str) -> Option<String> {
-    let win = web_sys::window()?;
-    let storage = win.local_storage().ok()??;
-    storage.get_item(key).ok().flatten()
-}
-
-/// `localStorage.setItem(key, value)`.
-fn local_storage_set(key: &str, value: &str) -> Option<()> {
-    let win = web_sys::window()?;
-    let storage = win.local_storage().ok()??;
-    storage.set_item(key, value).ok()?;
-    Some(())
-}
+// ---- WASM logging shim --------------------------------------------------
 
 /// Log a warning to the browser console.
+///
+/// Note for anyone adding call sites: never pass a secret or the admin API
+/// key through here. The console is readable by extensions and screen-shared
+/// without a second thought.
 fn tracing_warn(msg: String) {
     web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&msg));
 }
 
-/// localStorage key for the admin's relayer `ADMIN_API_KEY`.
+/// One-time startup cleanup: delete any relayer admin key an older build
+/// persisted to web storage, and remember whether there was one.
 ///
-/// This is a *different* credential from the wallet-based admin gate
-/// (`is_admin`, checked against the on-chain `VotingManager.owner`): it
-/// authenticates to the relayer's `/api/admin/registrations/*` routes, which
-/// talk to the relayer's off-chain store rather than the chain. Stored only
-/// in the browser operating the admin UI, never bundled into the WASM build.
-const ADMIN_API_KEY_STORAGE_KEY: &str = "viche:admin_api_key";
-
-/// Load the previously-entered relayer admin API key, if any.
-pub fn load_admin_api_key() -> Option<String> {
-    local_storage_get(ADMIN_API_KEY_STORAGE_KEY)
-}
-
-/// Persist the relayer admin API key for next time.
-pub fn save_admin_api_key(key: &str) {
-    let _ = local_storage_set(ADMIN_API_KEY_STORAGE_KEY, key);
+/// Called from [`crate::app::App`]. See [`crate::admin_key`] for why the key
+/// is no longer persisted at all, and why finding one means "rotate it", not
+/// just "delete it".
+pub fn purge_legacy_admin_api_key(signals: AppSignals) {
+    if crate::admin_key::purge_persisted_admin_api_key() {
+        signals.admin_key_was_persisted.set(true);
+    }
 }
 
 #[cfg(test)]
@@ -706,6 +994,105 @@ mod tests {
         let root = format!("0x{}", "ab".repeat(32));
         let err = validate_create_poll_input(&root, "three", "2030-01-01T00:00").unwrap_err();
         assert!(err.contains("Number of options"));
+    }
+
+    // ---- registration review messaging (pure) -----------------------------
+
+    #[test]
+    fn nothing_approved_message_names_the_pending_count() {
+        let msg = nothing_approved_message(Some(7), "no approved registrations");
+        assert!(msg.contains('7'), "count missing: {msg}");
+        assert!(msg.contains("approve"), "no call to action: {msg}");
+        // The relayer's own words are kept for diagnosis, not discarded.
+        assert!(msg.contains("no approved registrations"), "detail lost: {msg}");
+    }
+
+    #[test]
+    fn nothing_approved_message_falls_back_without_a_known_count() {
+        // Must not assert a number it cannot back up.
+        for pending in [None, Some(0)] {
+            let msg = nothing_approved_message(pending, "nothing approved");
+            assert!(msg.contains("Refresh"), "no recovery path: {msg}");
+            assert!(!msg.contains(" 0 pending"), "claimed a bogus count: {msg}");
+        }
+    }
+
+    #[test]
+    fn review_summary_reports_affected_and_total() {
+        let resp = crate::api::ReviewRegistrationsResponse {
+            affected: 3,
+            unknown: vec![],
+            total_pending: 2,
+        };
+        let msg = review_summary(ReviewAction::Approve, 3, &resp);
+        assert!(msg.starts_with("Approved 3 of 3"), "unexpected: {msg}");
+        assert!(msg.contains("2 still pending"), "unexpected: {msg}");
+        assert!(!msg.contains("not recognised"), "spurious warning: {msg}");
+    }
+
+    #[test]
+    fn review_summary_surfaces_unknown_commitments() {
+        // The whole reason `unknown` exists: a partially-applied list must
+        // be visible, never silently dropped.
+        let resp = crate::api::ReviewRegistrationsResponse {
+            affected: 1,
+            unknown: vec![U256::from(9u64), U256::from(10u64)],
+            total_pending: 4,
+        };
+        let msg = review_summary(ReviewAction::Approve, 3, &resp);
+        assert!(msg.contains("Approved 1 of 3"), "unexpected: {msg}");
+        assert!(msg.contains("2 were not recognised"), "unexpected: {msg}");
+    }
+
+    // ---- review guards ----------------------------------------------------
+    //
+    // These all return before `spawn_local`, so they run on the native
+    // target and are actually executed by `cargo test` rather than waiting
+    // on a browser.
+
+    #[test]
+    fn review_refuses_without_an_admin_key() {
+        let signals = AppSignals::new();
+        signals
+            .pending_commitments
+            .set(Some(vec![U256::from(1u64)]));
+
+        approve_pending_registrations(signals.clone(), String::new());
+        let r = signals.review.get_untracked();
+        assert_eq!(r.phase, crate::state::ReviewPhase::Failed);
+        assert!(r.message.unwrap().contains("admin API key"));
+    }
+
+    #[test]
+    fn review_refuses_when_no_list_has_been_loaded() {
+        // Approving a batch the admin never saw is the rubber-stamp the
+        // approval gate exists to prevent.
+        let signals = AppSignals::new();
+        approve_pending_registrations(signals.clone(), "k3y".into());
+        let r = signals.review.get_untracked();
+        assert_eq!(r.phase, crate::state::ReviewPhase::Failed);
+        assert!(r.message.unwrap().contains("Load the pending registrations"));
+    }
+
+    #[test]
+    fn review_refuses_an_empty_batch() {
+        let signals = AppSignals::new();
+        signals.pending_commitments.set(Some(vec![]));
+        reject_pending_registrations(signals.clone(), "k3y".into());
+        let r = signals.review.get_untracked();
+        assert_eq!(r.phase, crate::state::ReviewPhase::Failed);
+        assert!(r.message.unwrap().contains("no pending registrations"));
+    }
+
+    #[test]
+    fn review_summary_uses_the_right_verb_for_reject() {
+        let resp = crate::api::ReviewRegistrationsResponse {
+            affected: 2,
+            unknown: vec![],
+            total_pending: 0,
+        };
+        let msg = review_summary(ReviewAction::Reject, 2, &resp);
+        assert!(msg.starts_with("Rejected 2 of 2"), "unexpected: {msg}");
     }
 
     // ---- validate_close_poll_input (pure) ---------------------------------
@@ -1037,34 +1424,293 @@ mod wasm_tests {
         assert_eq!(signals.polls.get_untracked(), Some(vec![]));
     }
 
-    // ---- load_or_create_secret ---------------------------------------------
+    // ---- voter secret actions ---------------------------------------------
+    //
+    // The derivation itself is covered in `crate::secret`; these cover the
+    // signal plumbing, which is where a silent failure would hide.
 
     #[wasm_bindgen_test]
-    fn load_or_create_secret_persists_and_reuses_a_generated_secret() {
-        let addr = "0xSECRETTEST1";
-        let window = web_sys::window().unwrap();
-        let storage = window.local_storage().unwrap().unwrap();
-        let _ = storage.remove_item(&format!("viche:secret:{}", addr));
-
-        let first = load_or_create_secret(addr).unwrap();
-        let second = load_or_create_secret(addr).unwrap();
-        assert_eq!(first, second, "second call should reuse the persisted secret");
-
-        let _ = storage.remove_item(&format!("viche:secret:{}", addr));
+    fn load_secret_fails_fast_without_a_connected_wallet() {
+        let signals = AppSignals::new();
+        load_secret(signals.clone());
+        let s = signals.secret.get_untracked();
+        assert!(!s.busy, "must not sit spinning with no wallet to ask");
+        assert_eq!(s.error.as_deref(), Some("Connect your wallet first."));
     }
 
     #[wasm_bindgen_test]
-    fn load_or_create_secret_regenerates_on_corrupt_storage() {
-        let addr = "0xSECRETTEST2";
+    async fn load_secret_publishes_a_derived_secret_into_the_signal() {
+        let _guard = lock_global_mocks().await;
+        let addr = "0xACTIONSECRET1";
+        let _ = crate::secret::forget(addr);
+        install_mock_ethereum(
+            r#"if (method === "personal_sign") { return Promise.resolve("0x" + "4d".repeat(65)); }
+               return Promise.reject(new Error("unexpected method: " + method));"#,
+            true,
+        );
+
+        let signals = AppSignals::new();
+        signals.wallet_connected(addr.to_string(), "0x1".to_string());
+        load_secret(signals.clone());
+
+        let settled = wait_until(|| signals.secret.get_untracked().value.is_some(), 50).await;
+        assert!(settled, "secret never resolved");
+
+        let s = signals.secret.get_untracked();
+        assert!(!s.busy);
+        assert!(s.error.is_none());
+        assert_eq!(
+            s.origin,
+            Some(crate::secret::SecretOrigin::WalletDerivedV1)
+        );
+        assert_eq!(
+            s.value,
+            Some(
+                crate::secret::derive_from_signature(&[0x4du8; 65])
+                    .unwrap()
+                    .to_string()
+            )
+        );
+
+        remove_mock_ethereum();
+        let _ = crate::secret::forget(addr);
+    }
+
+    #[wasm_bindgen_test]
+    async fn load_secret_surfaces_a_refused_signature_as_an_error() {
+        let _guard = lock_global_mocks().await;
+        let addr = "0xACTIONSECRET2";
+        let _ = crate::secret::forget(addr);
+        install_mock_ethereum(
+            r#"return Promise.reject(new Error("User rejected the request."));"#,
+            true,
+        );
+
+        let signals = AppSignals::new();
+        signals.wallet_connected(addr.to_string(), "0x1".to_string());
+        load_secret(signals.clone());
+
+        wait_until(|| signals.secret.get_untracked().error.is_some(), 50).await;
+        let s = signals.secret.get_untracked();
+        assert!(s.value.is_none(), "no secret should be invented on refusal");
+        assert!(s.error.unwrap().contains("signature"));
+
+        remove_mock_ethereum();
+        let _ = crate::secret::forget(addr);
+    }
+
+    #[wasm_bindgen_test]
+    fn import_secret_round_trips_a_backup_and_reports_it() {
+        let addr = "0xACTIONIMPORT1";
+        let _ = crate::secret::forget(addr);
+
+        let signals = AppSignals::new();
+        signals.wallet_connected(addr.to_string(), "0x1".to_string());
+        import_secret(signals.clone(), "  90210  ".to_string());
+
+        let s = signals.secret.get_untracked();
+        assert_eq!(s.value.as_deref(), Some("90210"));
+        assert_eq!(s.origin, Some(crate::secret::SecretOrigin::Imported));
+        assert!(s.notice.is_some(), "the voter should be told it worked");
+        assert!(s.error.is_none());
+
+        let _ = crate::secret::forget(addr);
+    }
+
+    #[wasm_bindgen_test]
+    fn import_secret_warns_when_the_backup_belongs_to_another_account() {
+        let addr = "0xACTIONIMPORT2";
+        let _ = crate::secret::forget(addr);
+
+        let signals = AppSignals::new();
+        signals.wallet_connected(addr.to_string(), "0x1".to_string());
+        import_secret(
+            signals.clone(),
+            r#"{"viche_backup":1,"address":"0xSOMEONEELSE1234","secret":"777"}"#.to_string(),
+        );
+
+        let notice = signals.secret.get_untracked().notice.unwrap();
+        assert!(notice.contains("not the connected account"), "no warning: {notice}");
+
+        let _ = crate::secret::forget(addr);
+    }
+
+    #[wasm_bindgen_test]
+    fn import_secret_rejects_garbage_without_touching_the_cache() {
+        let addr = "0xACTIONIMPORT3";
+        let _ = crate::secret::forget(addr);
+
+        let signals = AppSignals::new();
+        signals.wallet_connected(addr.to_string(), "0x1".to_string());
+        import_secret(signals.clone(), "definitely not a secret".to_string());
+
+        let s = signals.secret.get_untracked();
+        assert!(s.error.is_some());
+        assert!(s.value.is_none());
+        assert!(crate::secret::cached(addr).unwrap().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn forget_secret_clears_the_cache_and_the_signal() {
+        let addr = "0xACTIONFORGET1";
+        let signals = AppSignals::new();
+        signals.wallet_connected(addr.to_string(), "0x1".to_string());
+        import_secret(signals.clone(), "12345".to_string());
+        assert!(signals.secret.get_untracked().value.is_some());
+
+        forget_secret(signals.clone());
+        let s = signals.secret.get_untracked();
+        assert!(s.value.is_none());
+        assert!(s.origin.is_none());
+        assert!(s.notice.is_some());
+        assert!(crate::secret::cached(addr).unwrap().is_none());
+    }
+
+    // ---- relayer admin API key --------------------------------------------
+
+    #[wasm_bindgen_test]
+    fn admin_api_key_is_never_written_to_web_storage() {
+        // The regression this whole change exists to prevent.
+        let signals = AppSignals::new();
+        signals.set_admin_api_key("top-secret-admin-key");
+        assert_eq!(signals.admin_api_key_value(), "top-secret-admin-key");
+
+        let window = web_sys::window().unwrap();
+        for storage in [
+            window.local_storage().unwrap().unwrap(),
+            window.session_storage().unwrap().unwrap(),
+        ] {
+            let len = storage.length().unwrap();
+            for i in 0..len {
+                let key = storage.key(i).unwrap().unwrap_or_default();
+                let value = storage.get_item(&key).unwrap().unwrap_or_default();
+                assert!(
+                    !value.contains("top-secret-admin-key"),
+                    "admin key leaked into storage under {key}"
+                );
+            }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn blank_admin_key_input_clears_rather_than_stores_an_empty_string() {
+        let signals = AppSignals::new();
+        signals.set_admin_api_key("abc");
+        assert!(signals.admin_api_key.get_untracked().is_some());
+
+        signals.set_admin_api_key("   ");
+        assert!(signals.admin_api_key.get_untracked().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn clear_admin_api_key_forgets_it_immediately() {
+        let signals = AppSignals::new();
+        signals.set_admin_api_key("abc");
+        signals.clear_admin_api_key();
+        assert_eq!(signals.admin_api_key_value(), "");
+    }
+
+    #[wasm_bindgen_test]
+    fn admin_actions_fail_fast_without_a_key_instead_of_sending_an_empty_bearer() {
+        let signals = AppSignals::new();
+
+        build_whitelist_from_registrations(signals.clone(), String::new());
+        let build = signals.whitelist_build.get_untracked();
+        assert_eq!(build.phase, WhitelistBuildPhase::Failed);
+        assert!(build.message.unwrap().contains("admin API key"));
+
+        refresh_pending_registrations(signals.clone(), "   ".to_string());
+        assert!(signals
+            .pending_registrations_error
+            .get_untracked()
+            .unwrap()
+            .contains("admin API key"));
+    }
+
+    // ---- registration review ----------------------------------------------
+
+    #[wasm_bindgen_test]
+    async fn building_the_whitelist_never_performs_a_review() {
+        // Guard against the tempting "fix" for the snapshot failure:
+        // auto-approving inside the build flow would silently disable the
+        // review gate while looking like a bug fix. If anyone ever wires an
+        // approve call into `build_whitelist_from_registrations`, the review
+        // signal moves off Idle and this fails.
+        //
+        // Browser-only: the build flow reaches `web_sys::window()` through
+        // `ready_poseidon`, which cannot run on the native target.
+        let signals = AppSignals::new();
+        signals
+            .pending_commitments
+            .set(Some(vec![U256::from(1u64)]));
+
+        build_whitelist_from_registrations(signals.clone(), "k3y".into());
+        // Let the spawned task run as far as it can (it will fail at the
+        // Poseidon bridge or the relayer call - either way, no review).
+        next_tick().await;
+        next_tick().await;
+
+        assert_eq!(
+            signals.review.get_untracked().phase,
+            crate::state::ReviewPhase::Idle,
+            "building a whitelist must never perform a review"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn approving_sends_the_exact_list_the_admin_reviewed() {
+        // The list is captured synchronously from `pending_commitments`, so
+        // a registration arriving after the refresh cannot be swept in. This
+        // asserts the batch is read before any await point.
+        let signals = AppSignals::new();
+        let batch = vec![U256::from(11u64), U256::from(22u64)];
+        signals.pending_commitments.set(Some(batch.clone()));
+
+        approve_pending_registrations(signals.clone(), "k3y".into());
+
+        // It got past every guard and is in flight, meaning it accepted the
+        // loaded batch rather than rejecting it.
+        assert_eq!(
+            signals.review.get_untracked().phase,
+            crate::state::ReviewPhase::Submitting
+        );
+        // The snapshot of the batch happened before the request was spawned.
+        assert_eq!(signals.pending_commitments.get_untracked(), Some(batch));
+    }
+
+    #[wasm_bindgen_test]
+    fn review_phase_transition_clears_a_previous_result() {
+        let signals = AppSignals::new();
+        signals.review_done("Approved 2 of 2.", 2, vec![U256::from(5u64)]);
+        assert!(signals.review.get_untracked().affected.is_some());
+
+        signals.review_phase(crate::state::ReviewPhase::Submitting);
+        let r = signals.review.get_untracked();
+        assert!(r.affected.is_none(), "stale count survived");
+        assert!(r.unknown.is_empty(), "stale unknown list survived");
+        assert!(r.message.is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn purge_legacy_admin_api_key_flags_a_previously_persisted_key() {
         let window = web_sys::window().unwrap();
         let storage = window.local_storage().unwrap().unwrap();
-        let key = format!("viche:secret:{}", addr);
-        storage.set_item(&key, "not-a-number").unwrap();
+        storage
+            .set_item(crate::admin_key::LEGACY_ADMIN_KEY_STORAGE_KEY, "old-key")
+            .unwrap();
 
-        // Should not error out — falls back to generating a fresh secret.
-        let secret = load_or_create_secret(addr).unwrap();
-        assert_ne!(secret, U256::ZERO);
+        let signals = AppSignals::new();
+        purge_legacy_admin_api_key(signals.clone());
 
-        let _ = storage.remove_item(&key);
+        assert!(
+            signals.admin_key_was_persisted.get_untracked(),
+            "the admin should be told to rotate the key"
+        );
+        assert_eq!(
+            storage
+                .get_item(crate::admin_key::LEGACY_ADMIN_KEY_STORAGE_KEY)
+                .unwrap(),
+            None
+        );
     }
 }

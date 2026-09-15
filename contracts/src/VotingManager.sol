@@ -153,14 +153,26 @@ contract VotingManager {
     /// @dev    `msg.sender` is the relayer, not the voter — the contract never
     ///         reads voter identity, it relies entirely on the ZK proof +
     ///         nullifier. The relayer is trusted only for *delivery*, not
-    ///         for correctness: a malicious relayer can drop or reorder votes
-    ///         but cannot forge one (no valid proof) or double-vote (nullifier
-    ///         is fixed by the voter's secret + pollId).
+    ///         for correctness: a malicious relayer can drop, delay or reorder
+    ///         votes but cannot forge one (no valid proof), double-vote
+    ///         (nullifier is fixed by the voter's secret + pollId), or alter
+    ///         the ballot (`voteOption` is a public input of the proof).
+    ///
+    ///         The same binding is what makes this function safe to leave
+    ///         permissionless. Proofs are visible in the mempool; without
+    ///         `voteOption` in the public signals, any observer could copy a
+    ///         pending (proof, nullifier) pair, resubmit it with a different
+    ///         option at higher gas, and both flip the ballot and grief the
+    ///         real voter into an `AlreadyVoted` revert. Re-submitting the
+    ///         same proof verbatim is still possible, but it is a no-op that
+    ///         merely front-runs the voter's own identical vote.
     ///
     /// @param pollId        Target poll; MUST equal the circuit's `voteId`.
     /// @param proof         abi.encode(pA, pB, pC) — three Groth16 points.
     /// @param nullifierHash Poseidon(secret, pollId); the double-voting tag.
-    /// @param voteOption    Index of the chosen option.
+    /// @param voteOption    Index of the chosen option. MUST equal the
+    ///                      `voteOption` the proof was generated for, or
+    ///                      verification fails with `InvalidProof`.
     function castVote(
         uint256 pollId,
         bytes calldata proof,
@@ -181,12 +193,18 @@ contract VotingManager {
             abi.decode(proof, (uint256[2], uint256[2][2], uint256[2]));
 
         // Public-signal order MUST match `vote.circom`:
-        //     [voteId, merkleRoot, nullifierHash]
+        //     [voteId, merkleRoot, nullifierHash, voteOption]
         // We bind voteId == pollId and merkleRoot == the poll's stored root
         // from on-chain state, so the proof is replay-bound to this exact poll
         // and this exact whitelist — cross-poll replay is impossible.
-        uint256[3] memory pubSignals =
-            [pollId, uint256(p.merkleRoot), uint256(nullifierHash)];
+        //
+        // `voteOption` is passed through from calldata *and verified*: because
+        // it is a public input of the circuit, the pairing check only passes
+        // if the caller supplies the same option the voter proved. That is
+        // what stops a front-runner (or the relayer) from copying a pending
+        // proof, swapping the option, and burning the nullifier.
+        uint256[4] memory pubSignals =
+            [pollId, uint256(p.merkleRoot), uint256(nullifierHash), voteOption];
 
         if (!verifier.verifyProof(pA, pB, pC, pubSignals)) revert InvalidProof();
 

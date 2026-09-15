@@ -11,6 +11,11 @@
 //! anonymity would collapse to "trust the operator". So we prove client-side.
 //! Only `{proof, nullifier, voteOption}` leave the browser.
 //!
+//! Client-side proving is also what makes the ballot unforgeable in transit.
+//! `voteOption` is a public input of the circuit, so the proof commits to it:
+//! neither the relayer nor anyone watching the mempool can swap the option on
+//! a proof they did not generate, because doing so would require the secret.
+//!
 //! ## Asset loading
 //!
 //! The circuit artifacts (`vote.wasm`, `vote_final.zkey`) are produced by
@@ -40,6 +45,17 @@ pub struct ProofResult {
     pub proof_bytes: Bytes,
     /// The nullifier hash (`Poseidon(secret, voteId)`), one of the public signals.
     pub nullifier_hash: U256,
+    /// The option the proof was actually generated for, read back out of the
+    /// public signals rather than carried forward from the UI.
+    ///
+    /// Callers should submit *this* value in the `VoteRequest`. It is
+    /// necessarily identical to the witness's `vote_option`, which is exactly
+    /// the point: routing the submitted option through the prover's output
+    /// makes "proved option X, submitted option Y" unrepresentable in the
+    /// frontend instead of merely unlikely. A mismatch is not a silent
+    /// miscount any more — it is an `InvalidProof` revert — but it is still
+    /// better not to be able to build one.
+    pub vote_option: U256,
 }
 
 /// A Groth16 prover bound to specific circuit artifact URLs.
@@ -69,6 +85,15 @@ pub struct VoteWitness {
     pub merkle_root: U256,
     /// The nullifier `Poseidon(secret, vote_id)` (public input).
     pub nullifier_hash: U256,
+    /// The chosen option index (public input).
+    ///
+    /// This is a *public input of the circuit*, not a free-form argument
+    /// attached to the request later: the proof is cryptographically bound to
+    /// this exact option, which is what stops the relayer — or anyone
+    /// front-running the transaction out of the mempool — from rewriting the
+    /// ballot. It must be the same value the `VoteRequest` eventually carries
+    /// to `castVote`, or the on-chain verification fails.
+    pub vote_option: U256,
 }
 
 impl ProofGenerator {
@@ -119,11 +144,12 @@ impl ProofGenerator {
         let proof = js_sys::Reflect::get(&resolved, &"proof".into()).map_err(js_err)?;
 
         let proof_bytes = pack_proof_bytes(&proof)?;
-        let nullifier_hash = extract_nullifier(&public_signals)?;
+        let signals = extract_public_signals(&public_signals)?;
 
         Ok(ProofResult {
             proof_bytes,
-            nullifier_hash,
+            nullifier_hash: signals.nullifier_hash,
+            vote_option: signals.vote_option,
         })
     }
 }
@@ -185,6 +211,12 @@ fn build_witness_object(witness: &VoteWitness) -> Result<wasm_bindgen::JsValue> 
         &obj,
         &"nullifierHash".into(),
         &witness.nullifier_hash.to_string().into(),
+    )
+    .map_err(js_err)?;
+    js_sys::Reflect::set(
+        &obj,
+        &"voteOption".into(),
+        &witness.vote_option.to_string().into(),
     )
     .map_err(js_err)?;
 
@@ -260,17 +292,39 @@ fn pack_proof_bytes(proof: &wasm_bindgen::JsValue) -> Result<Bytes> {
     Ok(Bytes::from(bytes))
 }
 
-/// Extract the nullifier hash from the public signals.
-fn extract_nullifier(public_signals: &wasm_bindgen::JsValue) -> Result<U256> {
+/// The public signals we read back out of snarkjs's result.
+struct PublicSignals {
+    nullifier_hash: U256,
+    vote_option: U256,
+}
+
+/// Number of public signals the `vote` circuit exposes.
+///
+/// Order is `[voteId, merkleRoot, nullifierHash, voteOption]` — see the
+/// PUBLIC-SIGNAL ORDERING block in `circuits/circuits/vote.circom`. The
+/// indices below are positional, so this must be kept in lockstep with the
+/// circuit; an exact-length check makes a circuit change that forgets this
+/// file fail loudly here rather than silently read the wrong slot.
+const PUBLIC_SIGNAL_COUNT: u32 = 4;
+
+/// Extract the public signals the caller needs from snarkjs's output.
+fn extract_public_signals(public_signals: &wasm_bindgen::JsValue) -> Result<PublicSignals> {
     let arr: Array = public_signals
         .clone()
         .dyn_into()
         .map_err(|_| anyhow!("publicSignals is not an array"))?;
-    if arr.length() < 3 {
-        return Err(anyhow!("publicSignals has fewer than 3 elements"));
+    if arr.length() != PUBLIC_SIGNAL_COUNT {
+        return Err(anyhow!(
+            "publicSignals has {} elements, expected {} — the loaded circuit artifacts do not \
+             match this build (re-run `make circuits` and refresh the served .wasm/.zkey)",
+            arr.length(),
+            PUBLIC_SIGNAL_COUNT
+        ));
     }
-    let nullifier = parse_signal(&arr.get(2))?;
-    Ok(nullifier)
+    Ok(PublicSignals {
+        nullifier_hash: parse_signal(&arr.get(2))?,
+        vote_option: parse_signal(&arr.get(3))?,
+    })
 }
 
 /// Parse a single circom signal (string or bigint) into a [`U256`].
@@ -302,12 +356,23 @@ mod tests {
             vote_id: U256::from(1u64),
             merkle_root: U256::from(100u64),
             nullifier_hash: U256::from(200u64),
+            vote_option: U256::from(2u64),
         };
         let js_obj = build_witness_object(&witness).unwrap();
         assert!(js_sys::Reflect::has(&js_obj, &"secret".into()).unwrap());
         assert!(js_sys::Reflect::has(&js_obj, &"voteId".into()).unwrap());
         assert!(js_sys::Reflect::has(&js_obj, &"merkleRoot".into()).unwrap());
         assert!(js_sys::Reflect::has(&js_obj, &"nullifierHash".into()).unwrap());
+        // The circuit will not accept a witness without this, and omitting it
+        // is exactly the bug that made ballots rewritable — assert on it.
+        assert!(js_sys::Reflect::has(&js_obj, &"voteOption".into()).unwrap());
+        assert_eq!(
+            js_sys::Reflect::get(&js_obj, &"voteOption".into())
+                .unwrap()
+                .as_string()
+                .unwrap(),
+            "2"
+        );
     }
 
     #[test]
@@ -331,11 +396,13 @@ mod tests {
             vote_id: U256::from(1u64),
             merkle_root: U256::from(999u64),
             nullifier_hash: U256::from(888u64),
+            vote_option: U256::from(1u64),
         };
 
         assert_eq!(witness.secret, U256::from(100u64));
         assert_eq!(witness.path_elements.len(), 2);
         assert_eq!(witness.path_indices, vec![false, true]);
+        assert_eq!(witness.vote_option, U256::from(1u64));
     }
 }
 

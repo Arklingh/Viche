@@ -49,7 +49,16 @@ description   = "Decentralized anonymous voting dApp (ZK / Solidity / Rust WASM)
 tokio       = { version = "1.40", features = ["full"] }
 axum        = "0.7"
 tower       = "0.5"
-tower-http  = { version = "0.6", features = ["cors", "trace"] }
+# `limit` (request body caps), `timeout` (whole-request deadline) and
+# `set-header` (JSON-API security headers) back the relayer's hardening
+# middleware — see crates/viche-relayer/src/middleware.rs.
+tower-http  = { version = "0.6", features = [
+    "cors",
+    "trace",
+    "limit",
+    "timeout",
+    "set-header",
+] }
 
 # === Ethereum RPC (relayer, Phase 2) ===
 # `full` pulls in provider/contract/signer; frontend crate disables the

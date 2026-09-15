@@ -11,9 +11,10 @@
 //!   * It gives the UI a stable identity to key local storage (the voter's
 //!     `secret`) against, so a user doesn't accidentally vote with someone
 //!     else's secret on a shared machine.
-//!   * Future work: signing a message with the wallet to register an identity
-//!     commitment on-chain (out of scope for viche v1, where the admin
-//!     pre-builds the Merkle tree).
+//!   * It *derives* that secret, via [`Wallet::personal_sign`] over a fixed
+//!     domain-separated message — see [`crate::secret`]. That is what makes a
+//!     voter's identity reproducible on a second device instead of living
+//!     only in one browser's `localStorage`.
 
 use anyhow::{anyhow, Result};
 use js_sys::{Array, Function, JsString, Promise};
@@ -145,6 +146,42 @@ impl Wallet {
             .dyn_into()
             .map_err(|_| anyhow!("eth_sendTransaction returned a non-string result"))?;
         Ok(s.into())
+    }
+
+    /// `personal_sign` — an EIP-191 signature over an arbitrary message,
+    /// returning the raw signature bytes (65 for secp256k1: `r || s || v`).
+    ///
+    /// This costs no gas, broadcasts nothing, and authorises no transaction;
+    /// wallets render the message as text so the user can read what they are
+    /// signing. Viche uses it for exactly one thing — deriving the voter's
+    /// secret deterministically from their key (see [`crate::secret`]).
+    ///
+    /// Parameter order is `[message, address]`, which is the order MetaMask
+    /// and every provider that copied it expect — note that it is the reverse
+    /// of the (deprecated) `eth_sign`.
+    pub async fn personal_sign(&self, address: &str, message: &str) -> Result<Vec<u8>> {
+        // EIP-191 wants the message hex-encoded; passing raw UTF-8 works in
+        // MetaMask but not in every provider, so always encode.
+        let hex_message = alloy_primitives::hex::encode_prefixed(message.as_bytes());
+
+        let result = self
+            .call("personal_sign", &[hex_message.into(), address.into()])
+            .await
+            .map_err(|e| anyhow!("wallet declined to sign: {:?}", e))?;
+
+        let s: JsString = result
+            .dyn_into()
+            .map_err(|_| anyhow!("personal_sign returned a non-string result"))?;
+        let s: String = s.into();
+        let bytes = alloy_primitives::hex::decode(s.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("personal_sign returned invalid hex: {}", e))?;
+        if bytes.len() < 64 {
+            return Err(anyhow!(
+                "personal_sign returned a {}-byte signature; expected at least 64",
+                bytes.len()
+            ));
+        }
+        Ok(bytes)
     }
 
     /// Register a JS callback for `accountsChanged`.
@@ -412,6 +449,57 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("wallet rejected transaction"));
+        remove_mock_ethereum();
+    }
+
+    // ---- personal_sign ----------------------------------------------------
+
+    #[wasm_bindgen_test]
+    async fn personal_sign_hex_encodes_the_message_and_decodes_the_signature() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            // "hi" == 0x6869. Assert the *encoding* here, not just the
+            // round-trip: passing raw UTF-8 works in MetaMask and silently
+            // fails elsewhere, so the hex prefix is load-bearing.
+            r#"if (method === "personal_sign") {
+                 if (params[0] !== "0x6869" || params[1] !== "0xVOTER") {
+                   return Promise.reject(new Error("bad params: " + JSON.stringify(params)));
+                 }
+                 return Promise.resolve("0x" + "ab".repeat(65));
+               }
+               return Promise.reject(new Error("unexpected method: " + method));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let sig = wallet.personal_sign("0xVOTER", "hi").await.unwrap();
+        assert_eq!(sig.len(), 65);
+        assert!(sig.iter().all(|b| *b == 0xab));
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn personal_sign_surfaces_user_rejection() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            r#"return Promise.reject(new Error("User rejected the request."));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let err = wallet.personal_sign("0xVOTER", "hi").await.unwrap_err();
+        assert!(err.to_string().contains("wallet declined to sign"));
+        remove_mock_ethereum();
+    }
+
+    #[wasm_bindgen_test]
+    async fn personal_sign_rejects_a_truncated_signature() {
+        let _guard = lock_global_mocks().await;
+        install_mock_ethereum(
+            r#"return Promise.resolve("0x" + "ab".repeat(10));"#,
+            true,
+        );
+        let wallet = detect().unwrap();
+        let err = wallet.personal_sign("0xVOTER", "hi").await.unwrap_err();
+        assert!(err.to_string().contains("expected at least 64"));
         remove_mock_ethereum();
     }
 

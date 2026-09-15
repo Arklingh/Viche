@@ -9,6 +9,7 @@
 
 use leptos::*;
 
+use crate::components::SecretBackupPanel;
 use crate::state::{AppSignals, RegisterPhase};
 
 /// The "Register to Vote" page.
@@ -27,6 +28,16 @@ pub fn RegisterPage(#[prop(into)] signals: AppSignals) -> impl IntoView {
                 "the next poll's whitelist. Your secret never leaves this browser — only its "
                 "one-way hash is sent."
             </p>
+
+            {
+                // Registering is the point of no return: the commitment goes
+                // into a Merkle root the contract will not let anyone amend.
+                // The backup panel therefore sits on *this* page, above the
+                // button, so a voter meets the "back this up" message before
+                // they commit rather than after they have lost the secret.
+                let backup_signals = signals.clone();
+                view! { <SecretBackupPanel signals=backup_signals /> }
+            }
 
             {move || {
                 if wallet.get().address.is_none() {

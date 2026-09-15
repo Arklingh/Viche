@@ -50,6 +50,21 @@ export ETHERSCAN_API_KEY="<your-etherscan-key>"
 export DEPLOYER_PRIVATE_KEY="0x..."   # the funded deployer EOA
 ```
 
+You also need `VKEY_HASH` — the `keccak256` of the runtime bytecode of the
+verifier you are deploying. **The script fails closed without it**, because
+`VotingManager.verifier` is immutable and a verifier built from a trusted
+setup whose toxic waste still exists lets its holder forge unlimited votes:
+
+```bash
+export VKEY_HASH="0x..."   # see docs/trusted-setup-ceremony.md
+```
+
+Running without it aborts the deploy and prints the codehash it computed, so
+a first attempt tells you the value. Do not paste that value back in
+reflexively — it is only meaningful once you know which setup produced the
+verifier. `ALLOW_DEV_VERIFIER=true` bypasses the check entirely and is for
+local anvil only; it has no legitimate use on a network in this document.
+
 Then run the existing deploy script against the named network profile:
 
 ```bash
@@ -69,7 +84,10 @@ address for both the relayer and the frontend.
 
 If you already have a verifier deployed (e.g. redeploying `VotingManager`
 without a new circuit), set `VERIFIER_ADDRESS` to skip deploying a new one —
-see the script's own doc comment.
+see the script's own doc comment. The `VKEY_HASH` check applies to that
+address too, and it is the case where it matters most: a typo'd or
+wrong-network `VERIFIER_ADDRESS` would otherwise be baked into an immutable
+field.
 
 ---
 
@@ -166,33 +184,162 @@ export VICHE_VOTING_MANAGER_ADDRESS="0x..."   # from step 2
 export VICHE_CHAIN_ID="0xaa36a7"              # 11155111 (Sepolia) in hex
 ```
 
+If the relayer is served from a **different origin** than the frontend, also
+set `VICHE_CSP_CONNECT_SRC` — the frontend ships a `default-src 'self'`
+Content-Security-Policy, and a cross-origin relayer has to be named in
+`connect-src` or every API call is blocked by the browser:
+
+```bash
+export VICHE_CSP_CONNECT_SRC="https://relayer.example.com"
+```
+
+Space-separate multiple origins. Leave it unset for the default topology,
+where a reverse proxy exposes the relayer under `/api` on the frontend's own
+origin (covered by `'self'`). See §4.5.
+
 ### 4.2 Build
 
 ```bash
 make circuits          # if not already done — see prerequisites
 make frontend-assets   # syncs vote.wasm / vote_final.zkey into the Trunk public dir
-cd crates/viche-frontend && trunk build --release
+make frontend          # npm ci + Tailwind + trunk build --release + CSP checks
 ```
 
+Prefer `make frontend` over a bare `trunk build --release`: it runs `npm ci`
+first, which the build now needs. The stylesheet is compiled from source by the
+Tailwind CLI (the `cdn.tailwindcss.com` play CDN is gone), and that compile is
+a Trunk `pre_build` hook — so a bare `trunk build` works too **provided**
+`npm ci` has been run at the repo root at least once. Without it the build
+fails with an explicit message rather than emitting an unstyled page.
+
 Deploy the contents of `crates/viche-frontend/dist/` to your static host.
+`dist/` is generated output and is not tracked in git; never edit it in place
+except for `viche_env.js` (§4.3).
 
 ### 4.3 Runtime override (no rebuild needed)
 
 The same three values can be set at runtime instead, via `window` globals —
 useful for a single build serving multiple environments, or for overriding
-without a rebuild:
+without a rebuild. Edit **`dist/viche_env.js`** in the deployed bundle:
 
-```html
-<script>
-  window.__VICHE_RELAYER_URL__ = "https://relayer.example.com";
-  window.__VICHE_VOTING_MANAGER_ADDRESS__ = "0x...";
-  window.__VICHE_CHAIN_ID__ = "0xaa36a7";
-</script>
+```js
+window.__VICHE_RELAYER_URL__ = "https://relayer.example.com";
+window.__VICHE_VOTING_MANAGER_ADDRESS__ = "0x...";
+window.__VICHE_CHAIN_ID__ = "0xaa36a7";
 ```
 
-Add this before the Trunk-injected `<script type="module">` tag in
-`index.html` (or inject it from your hosting platform's own templating, if
-it has one) if you'd rather not rebuild per environment.
+That file ships empty (all lines commented out) and is loaded first, before
+anything else on the page, so `src/config.rs` sees the globals as soon as the
+wasm boots.
+
+> **Do not paste a `<script>` block into `index.html` for this.** Earlier
+> revisions of this runbook suggested exactly that; it no longer works. The
+> app's CSP is `script-src 'self' 'wasm-unsafe-eval'` with no
+> `'unsafe-inline'`, so the browser refuses an inline script — silently, as far
+> as the app is concerned: the overrides just never apply and the frontend
+> quietly falls back to same-origin `/api`. `viche_env.js` exists to be the
+> one obvious place for this.
+
+Pointing `__VICHE_RELAYER_URL__` at a **different origin** at runtime also
+needs that origin in `connect-src`, which `viche_env.js` cannot change (the
+policy is already parsed by then). Either rebuild with `VICHE_CSP_CONNECT_SRC`
+(§4.1) or send a `Content-Security-Policy` header from the reverse proxy that
+includes it (§4.5) — the header overrides nothing, but the *intersection* of
+header and meta policies is enforced, so the header must be at least as
+permissive on `connect-src` as you need **and** the meta tag must be too. In
+practice: if the relayer is cross-origin, set `VICHE_CSP_CONNECT_SRC` at build
+time.
+
+### 4.4 Third-party JavaScript: there is none
+
+The frontend loads **no code from any third-party origin**. snarkjs and
+circomlibjs are vendored into the bundle and served same-origin from
+`/vendor/`; the Tailwind stylesheet is pre-built.
+
+This is deliberate and it is a correctness property of the voting system, not
+a performance preference. snarkjs consumes the voter's `secret` in cleartext
+during witness generation and circomlibjs derives the Poseidon commitment from
+that same secret — both in the browser. Any party who can change those bytes
+can exfiltrate every voter's secret, which means total loss of ballot
+anonymity *and* the ability to forge a valid vote for every registered voter.
+
+`crates/viche-frontend/public/vendor/VENDOR.md` records the upstream source and
+a SHA-256 of every vendored file, and is deployed alongside them — so the
+hashes are verifiable against the live site:
+
+```bash
+curl -sS https://vote.example.com/vendor/snarkjs.min.js | sha256sum
+curl -sS https://vote.example.com/vendor/vendor-manifest.json | jq -r '.artifacts[]|"\(.sha256)  \(.file)"'
+```
+
+`make frontend-vendor-check` verifies the committed bytes still match
+`package-lock.json`; it is worth running in CI. If a future change genuinely
+needs a remote script, it must carry an SRI `integrity` attribute plus
+`crossorigin="anonymous"` and an exact immutable version URL — never a floating
+tag and never a `/+esm`-style generated artifact. The release build refuses to
+emit an `index.html` containing any `http(s)://` asset URL, so this is enforced,
+not just advised.
+
+### 4.5 Security headers for the static host / reverse proxy
+
+The bundle ships a `<meta http-equiv="Content-Security-Policy">` so the policy
+holds even on a dumb static host. Header-based CSP is strictly stronger
+(`frame-ancestors`, `report-uri` and `sandbox` are *ignored* in a meta tag, and
+a header applies to every response including the web worker), so send both.
+
+Recommended response headers for `crates/viche-frontend/dist/`:
+
+```
+Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; manifest-src 'self'; connect-src 'self' blob:
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+X-Frame-Options: DENY
+Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Resource-Policy: same-origin
+Strict-Transport-Security: max-age=63072000; includeSubDomains
+```
+
+Keep this string in sync with the `<meta>` tag in
+`crates/viche-frontend/index.html`, plus whatever you set in
+`VICHE_CSP_CONNECT_SRC` — append the same origins to `connect-src` here.
+
+Why each of the non-obvious ones:
+
+- **`script-src 'wasm-unsafe-eval'`** — Chromium refuses
+  `WebAssembly.compile()`/`instantiate()` from bytes without it, and three
+  separate things here need it: the Leptos wasm-bindgen module, the Poseidon
+  wasm that circomlibjs builds at runtime, and snarkjs's Groth16 prover. It is
+  *not* `'unsafe-eval'`: JS `eval()` and `new Function()` stay blocked.
+- **`worker-src`/`child-src 'self' blob:`** — `'self'` covers
+  `/zk_worker.js`; `blob:` covers the worker pool snarkjs builds from
+  `URL.createObjectURL(new Blob([...]))` to parallelise BN254 arithmetic.
+  Without `blob:`, proof generation fails — at the exact moment a voter votes.
+- **`connect-src blob:`** — `asset_cache.js` serves the cached
+  `vote.wasm`/`vote_final.zkey` as `blob:` URLs that snarkjs then fetches.
+- **`style-src 'unsafe-inline'`** — one inline `style` attribute remains
+  (`components/poll_detail.rs` sets the results-bar width). Inline style
+  *attributes* require it. `style-src-attr 'unsafe-inline'` would scope it more
+  tightly, but Safari ignores `style-src-attr` and falls back to `style-src`,
+  which would break the bar. Styling-only surface.
+- **`Referrer-Policy: no-referrer`** — deliberately the strictest value, not
+  `strict-origin-when-cross-origin`. This is a voting app: a `Referer` header
+  leaking a poll-specific URL to the relayer, an RPC provider or a block
+  explorer is a privacy problem in itself, and nothing in the app needs
+  referrers.
+- **`frame-ancestors 'none'` + `X-Frame-Options: DENY`** — prevents a
+  clickjacking frame around the voting UI. The redundancy is for older
+  browsers.
+
+The wallet is unaffected: MetaMask and other EIP-1193 providers are injected by
+a browser-extension content script running in an isolated world, which is
+exempt from the page's CSP, and the app never contacts an RPC endpoint itself
+(the wallet does). Verified against this exact policy.
+
+**Check it after deploying.** Open the site, open devtools, and confirm the
+console shows no `Refused to …` messages and that the network tab lists no
+third-party origins. A CSP that blocks proof generation fails only when
+somebody tries to vote, which is the worst possible time to find out.
 
 ---
 
@@ -203,6 +350,11 @@ it has one) if you'd rather not rebuild per environment.
       polls, if `VotingManager` wasn't freshly deployed).
 - [ ] The frontend loads and "Connect Wallet" successfully detects a
       testnet wallet (MetaMask set to the target network).
+- [ ] Browser devtools console shows **zero** `Refused to …` CSP messages on
+      load, and the network tab shows no third-party origins (§4.5).
+- [ ] `make frontend-vendor-check` passes, and the SHA-256 of
+      `/vendor/snarkjs.min.js` on the live site matches
+      `crates/viche-frontend/public/vendor/VENDOR.md` (§4.4).
 - [ ] Register a test commitment via the "Register to Vote" page, confirm
       it shows up via `GET /api/admin/registrations/pending` (with your
       `ADMIN_API_KEY`).
