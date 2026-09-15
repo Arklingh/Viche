@@ -117,16 +117,31 @@ frontend-vendor-check: ## Fail if the committed public/vendor/ bytes drift from 
 frontend-css: ## Build the Tailwind stylesheet (also runs automatically via Trunk's pre_build hook)
 	node $(FRONTEND_DIR)/tools/build_css.mjs
 
+# The destination filenames are fixed (`vote.wasm`, `vote_final.zkey`) even
+# though the sources are named after $(CIRCUIT_NAME): the frontend fetches
+# `/circuits/vote.wasm` and `/circuits/vote_final.zkey` by default (see
+# `option_env!("VICHE_CIRCUIT_WASM_URL")` in viche-frontend's actions.rs), so
+# this copy normalises whatever the circuit is called into the names the
+# browser asks for.
+#
+# Windows users are served by scripts/dev.ps1, which does this same resync in
+# PowerShell and never invokes this target — so, like every other recipe in
+# this file, it is plain POSIX sh.
 frontend-assets: ## Copy circuit wasm/zkey artifacts into the Trunk public dir
-	@if not exist "$(FRONTEND_WASM_ARTIFACT)" ( \
-		echo Missing $(FRONTEND_WASM_ARTIFACT). Run 'make circuits' first. && exit 1 \
-	)
-	@if not exist "$(FRONTEND_ZKEY_ARTIFACT)" ( \
-		echo Missing $(FRONTEND_ZKEY_ARTIFACT). Run 'make circuits' first. && exit 1 \
-	)
-	@if not exist "$(FRONTEND_PUBLIC_CIRCUITS_DIR)" mkdir "$(FRONTEND_PUBLIC_CIRCUITS_DIR)"
-	copy /Y $(subst /,\,$(FRONTEND_WASM_ARTIFACT)) $(subst /,\,$(FRONTEND_PUBLIC_CIRCUITS_DIR))\vote.wasm
-	copy /Y $(subst /,\,$(FRONTEND_ZKEY_ARTIFACT)) $(subst /,\,$(FRONTEND_PUBLIC_CIRCUITS_DIR))\vote_final.zkey
+	@missing=0; \
+	for f in "$(FRONTEND_WASM_ARTIFACT)" "$(FRONTEND_ZKEY_ARTIFACT)"; do \
+		if [ ! -s "$$f" ]; then \
+			echo "Missing or empty: $$f" >&2; \
+			missing=1; \
+		fi; \
+	done; \
+	if [ "$$missing" -ne 0 ]; then \
+		echo "Run 'make circuits' first to build the circuit artifacts." >&2; \
+		exit 1; \
+	fi
+	@mkdir -p "$(FRONTEND_PUBLIC_CIRCUITS_DIR)"
+	cp -f "$(FRONTEND_WASM_ARTIFACT)" "$(FRONTEND_PUBLIC_CIRCUITS_DIR)/vote.wasm"
+	cp -f "$(FRONTEND_ZKEY_ARTIFACT)" "$(FRONTEND_PUBLIC_CIRCUITS_DIR)/vote_final.zkey"
 
 # `frontend-deps` is a real dependency, not a convenience: the Tailwind
 # stylesheet is compiled from source now (the runtime-JIT play CDN is gone), and
