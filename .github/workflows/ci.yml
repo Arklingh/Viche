@@ -40,6 +40,37 @@ jobs:
           cd circuits
           npm test
 
+      # Guard the upload below. `if-no-files-found` is not enough on its own:
+      # it fires only when NO path matches, so with four paths listed and
+      # three of them valid, a mistyped fourth is a warning at most and the
+      # job stays green while shipping an incomplete artifact. That is
+      # precisely how `vkey.json` — a file compile.sh has never produced,
+      # since it names the key `${CIRCUIT}_vkey.json` — went unnoticed.
+      # Checking each path explicitly is what actually fails the build.
+      - name: Verify Circuit Artifacts Exist
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in \
+            circuits/build/vote_js/vote.wasm \
+            circuits/build/vote_final.zkey \
+            circuits/build/vote_vkey.json \
+            circuits/build/test_proof.json
+          do
+            if [ -s "$f" ]; then
+              echo "ok      $f ($(wc -c < "$f") bytes)"
+            else
+              echo "MISSING $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Expected circuit build outputs are missing or empty."
+            echo "Contents of circuits/build:"
+            ls -la circuits/build || true
+            exit 1
+          fi
+
       - name: Upload Circuit Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -47,8 +78,9 @@ jobs:
           path: |
             circuits/build/vote_js/vote.wasm
             circuits/build/vote_final.zkey
-            circuits/build/vkey.json
+            circuits/build/vote_vkey.json
             circuits/build/test_proof.json
+          if-no-files-found: error
 
   contracts:
     name: Solidity Contracts
