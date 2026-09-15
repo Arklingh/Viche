@@ -31,6 +31,22 @@ contract VotingManager {
     error InvalidDeadline();
     error InvalidNumOptions();
     error ZeroVerifier();
+    /// @dev `closePoll` was called before the deadline. Finalising early would
+    ///      let an admin freeze a tally that currently favours them; see
+    ///      `closePoll`.
+    error PollStillOpen(uint256 pollId, uint256 deadline);
+    /// @dev `cancelPoll` was called after voting had begun. Cancelling is only
+    ///      for retiring a misconfigured poll nobody has voted in.
+    error PollHasVotes(uint256 pollId, uint256 totalVotes);
+    /// @dev The poll is void; its tally is discarded and must not be read as a
+    ///      result.
+    error PollVoided(uint256 pollId);
+    /// @dev The poll's lifecycle has already ended (closed, cancelled, voided).
+    error PollNotOpen(uint256 pollId);
+    /// @dev `acceptOwnership` was called by someone who is not `pendingOwner`.
+    error NotPendingOwner();
+    /// @dev No ownership transfer is currently in flight.
+    error NoPendingOwner();
 
     // -------------------------------------------------------------------------
     // Events.
@@ -43,8 +59,38 @@ contract VotingManager {
         string metadataUri
     );
     event PollClosed(uint256 indexed pollId);
+    /// @notice A poll was retired before anyone voted in it (misconfiguration).
+    event PollCancelled(uint256 indexed pollId, string reason);
+    /// @notice A poll's results were discarded. `totalVotes` is recorded so the
+    ///         void is auditable — observers can see how far it had run.
+    event PollVoid(uint256 indexed pollId, uint256 totalVotes, string reason);
     event VoteCast(uint256 indexed pollId, bytes32 indexed nullifierHash, uint256 voteOption);
+    /// @notice An ownership transfer was proposed. Not yet in effect — the new
+    ///         owner must call `acceptOwnership`.
+    event OwnershipTransferStarted(address indexed currentOwner, address indexed pendingOwner);
+    /// @notice A proposed ownership transfer was withdrawn before acceptance.
+    event OwnershipTransferCancelled(address indexed currentOwner, address indexed pendingOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /// @notice A poll's lifecycle state.
+    ///
+    /// @dev Replaces the old `bool active`. The distinction that matters is
+    ///      between *finalised* and *discarded*: `Closed` means the tally
+    ///      stands, `Void` means it must not be read as a result at all. See
+    ///      `voidPoll` for why that difference is the whole point.
+    enum PollStatus {
+        /// @dev Never used — `exists` is false for an unknown poll, and the
+        ///      zero value here would otherwise be indistinguishable.
+        Nonexistent,
+        /// @dev Accepting votes (subject to the deadline).
+        Open,
+        /// @dev Finalised after the deadline. The tally is the result.
+        Closed,
+        /// @dev Retired before any vote was cast. No result, nobody affected.
+        Cancelled,
+        /// @dev Abandoned mid-flight. The tally is discarded, NOT a result.
+        Void
+    }
 
     /// @dev All the per-poll state. The tally lives in a nested mapping so it
     ///      can grow with the number of options without resizing arrays.
@@ -53,7 +99,7 @@ contract VotingManager {
         uint256 deadline;
         uint256 numOptions;
         uint256 totalVotes;
-        bool active;
+        PollStatus status;
         bool exists;
         mapping(uint256 => uint256) optionTally;
     }
@@ -62,7 +108,25 @@ contract VotingManager {
     IVerifier public immutable verifier;
 
     /// @notice Poll administrator (the only address that can create / close polls).
+    ///
+    /// @dev This is deliberately a plain `address`, so it can be an EOA, a
+    ///      multisig, or a timelock contract with no code change here. For a
+    ///      real election it should be a multisig: every power below is
+    ///      concentrated in this one address, and the two-step handover in
+    ///      `transferOwnership`/`acceptOwnership` exists precisely so that
+    ///      moving it to one cannot be fumbled.
     address public owner;
+
+    /// @notice Proposed next owner. Ownership does not move until this address
+    ///         calls `acceptOwnership`.
+    ///
+    /// @dev The two-step handover is not ceremony. A single-step transfer to a
+    ///      mistyped or non-signing address — a multisig whose threshold can't
+    ///      actually be met, say — permanently bricks poll administration with
+    ///      no recovery path, because the contract has no other privileged
+    ///      role. Requiring the recipient to prove it can transact first makes
+    ///      that failure impossible.
+    address public pendingOwner;
 
     /// @notice Counter for the next poll id. Starts at 1 so pollId 0 is
     ///         distinguishable from "uninitialised storage".
@@ -125,24 +189,127 @@ contract VotingManager {
         p.merkleRoot = merkleRoot;
         p.deadline = deadline;
         p.numOptions = numOptions;
-        p.active = true;
+        p.status = PollStatus.Open;
         p.exists = true;
 
         emit PollCreated(pollId, merkleRoot, deadline, numOptions, metadataUri);
     }
 
-    /// @notice Manually close a poll before its deadline (e.g. tallying early).
+    /// @notice Finalise a poll once its deadline has passed.
+    ///
+    /// @dev This used to allow closing at ANY time, which was an integrity
+    ///      hole rather than a convenience: the tally is public and updates
+    ///      per vote, so an admin could watch it and freeze the count at the
+    ///      exact moment it favoured them, disenfranchising everyone who had
+    ///      not yet voted. "Tallying early" is not a legitimate need — the
+    ///      tally is already readable at any time.
+    ///
+    ///      So closing is now only possible after `deadline`, at which point
+    ///      `castVote` already rejects every vote and this call decides
+    ///      nothing. It is pure bookkeeping: it marks the result final.
+    ///
+    ///      The two legitimate needs that early close used to serve are split
+    ///      into operations that cannot be abused for advantage:
+    ///        - a poll created with wrong parameters -> `cancelPoll`, which
+    ///          only works before anyone has voted;
+    ///        - a poll that must be abandoned mid-flight -> `voidPoll`, which
+    ///          DISCARDS the tally rather than freezing it.
     function closePoll(uint256 pollId) external onlyOwner pollExists(pollId) {
-        polls[pollId].active = false;
+        Poll storage p = polls[pollId];
+        if (p.status != PollStatus.Open) revert PollNotOpen(pollId);
+        if (block.timestamp <= p.deadline) revert PollStillOpen(pollId, p.deadline);
+
+        p.status = PollStatus.Closed;
         emit PollClosed(pollId);
     }
 
-    /// @notice Transfer poll-admin rights.
+    /// @notice Retire a poll that nobody has voted in yet.
+    ///
+    /// @dev The escape hatch for a misconfigured poll — a wrong Merkle root, a
+    ///      wrong option count, a deadline set in the wrong timezone. Bounded
+    ///      to `totalVotes == 0` so it can never revoke a ballot that has
+    ///      already been cast: with no votes recorded there is no result to
+    ///      distort and no voter to disenfranchise.
+    ///
+    ///      `reason` is recorded in the event rather than stored, so the
+    ///      decision is publicly auditable at no ongoing storage cost.
+    function cancelPoll(uint256 pollId, string calldata reason)
+        external
+        onlyOwner
+        pollExists(pollId)
+    {
+        Poll storage p = polls[pollId];
+        if (p.status != PollStatus.Open) revert PollNotOpen(pollId);
+        if (p.totalVotes != 0) revert PollHasVotes(pollId, p.totalVotes);
+
+        p.status = PollStatus.Cancelled;
+        emit PollCancelled(pollId, reason);
+    }
+
+    /// @notice Abandon a running poll and DISCARD its results.
+    ///
+    /// @dev The genuine emergency hatch — the whitelist turns out to contain a
+    ///      Sybil batch, the metadata described the wrong question, the
+    ///      circuit is found to be broken mid-vote. Unlike the old early
+    ///      `closePoll`, this is deliberately not a way to win.
+    ///
+    ///      That is the entire design: an admin who stops a poll mid-flight
+    ///      cannot keep the favourable partial count. Voiding throws the tally
+    ///      away — `getOptionTally` and `getResults` revert for a void poll —
+    ///      so the only outcome of using this power is "no result", never "the
+    ///      result I was ahead in". Removing the payoff removes the incentive,
+    ///      which is a stronger guarantee than trying to forbid the action.
+    ///
+    ///      `totalVotes` is emitted so observers can see how far the poll had
+    ///      run when it was voided, and judge the decision accordingly.
+    function voidPoll(uint256 pollId, string calldata reason)
+        external
+        onlyOwner
+        pollExists(pollId)
+    {
+        Poll storage p = polls[pollId];
+        if (p.status != PollStatus.Open) revert PollNotOpen(pollId);
+
+        p.status = PollStatus.Void;
+        emit PollVoid(pollId, p.totalVotes, reason);
+    }
+
+    /// @notice Propose a new poll administrator. Takes effect only when
+    ///         `newOwner` calls [`acceptOwnership`].
+    ///
+    /// @dev Step one of two — see [`pendingOwner`] for why this is not a
+    ///      single call. Proposing again overwrites any previous proposal.
     function transferOwnership(address newOwner) external onlyOwner {
         if (newOwner == address(0)) revert Unauthorized();
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /// @notice Withdraw a proposed ownership transfer before it is accepted.
+    ///
+    /// @dev Kept as its own function rather than overloading
+    ///      `transferOwnership(address(0))`, so that "hand over control" and
+    ///      "call the handover off" can never be confused for one another at
+    ///      the call site.
+    function cancelOwnershipTransfer() external onlyOwner {
+        address pending = pendingOwner;
+        if (pending == address(0)) revert NoPendingOwner();
+        delete pendingOwner;
+        emit OwnershipTransferCancelled(owner, pending);
+    }
+
+    /// @notice Accept a proposed ownership transfer. Callable only by the
+    ///         address named in [`pendingOwner`].
+    ///
+    /// @dev Completing the handover requires the recipient to actually send a
+    ///      transaction, which is what proves the address is controlled and
+    ///      can sign — the property a single-step transfer cannot check.
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
         address prev = owner;
-        owner = newOwner;
-        emit OwnershipTransferred(prev, newOwner);
+        owner = msg.sender;
+        delete pendingOwner;
+        emit OwnershipTransferred(prev, msg.sender);
     }
 
     // -------------------------------------------------------------------------
@@ -181,7 +348,7 @@ contract VotingManager {
     ) external pollExists(pollId) {
         Poll storage p = polls[pollId];
 
-        if (!p.active) revert PollNotActive(pollId);
+        if (p.status != PollStatus.Open) revert PollNotActive(pollId);
         if (block.timestamp > p.deadline) revert PollEnded(pollId);
         if (voteOption >= p.numOptions) revert InvalidVoteOption(voteOption);
         if (nullifierUsed[pollId][nullifierHash]) revert AlreadyVoted(nullifierHash);
@@ -235,17 +402,45 @@ contract VotingManager {
         )
     {
         Poll storage p = polls[pollId];
-        return (p.merkleRoot, p.deadline, p.numOptions, p.totalVotes, p.active);
+        // `active` is kept in the return tuple, and kept meaning exactly what
+        // it always meant — "will this poll accept a vote right now" — so the
+        // relayer and frontend need no change. `getPollStatus` exposes the
+        // richer lifecycle for callers that care WHY a poll stopped.
+        return (p.merkleRoot, p.deadline, p.numOptions, p.totalVotes, p.status == PollStatus.Open);
+    }
+
+    /// @notice A poll's full lifecycle state.
+    ///
+    /// @dev Prefer this over `getPoll`'s `active` flag when the distinction
+    ///      matters: `Closed` means the tally is the result, while `Void`
+    ///      means there is no result at all. Collapsing both to
+    ///      `active == false` would let a void poll be displayed as a
+    ///      finished one.
+    function getPollStatus(uint256 pollId)
+        external
+        view
+        pollExists(pollId)
+        returns (PollStatus)
+    {
+        return polls[pollId].status;
     }
 
     /// @notice Tally for a single option.
+    ///
+    /// @dev Reverts for a void poll rather than returning its last count.
+    ///      This is the mechanism that makes `voidPoll` unprofitable: if a
+    ///      voided tally were still readable, an admin could void while ahead
+    ///      and point at the frozen numbers. Making the result unreadable
+    ///      means voiding can only ever produce "no result".
     function getOptionTally(uint256 pollId, uint256 voteOption)
         external
         view
         pollExists(pollId)
         returns (uint256)
     {
-        return polls[pollId].optionTally[voteOption];
+        Poll storage p = polls[pollId];
+        if (p.status == PollStatus.Void) revert PollVoided(pollId);
+        return p.optionTally[voteOption];
     }
 
     /// @notice True if a ballot with this nullifier has already landed.

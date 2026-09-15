@@ -66,6 +66,12 @@ sol! {
         error InvalidProof();
         error InvalidDeadline();
         error InvalidNumOptions();
+        error PollStillOpen(uint256 pollId, uint256 deadline);
+        error PollHasVotes(uint256 pollId, uint256 totalVotes);
+        error PollVoided(uint256 pollId);
+        error PollNotOpen(uint256 pollId);
+        error NotPendingOwner();
+        error NoPendingOwner();
 
         /// @notice Create a new poll. Reverts (`Unauthorized`) if the caller
         ///         isn't `VotingManager.owner` — see [`crate::relay::submit_create_poll`].
@@ -83,9 +89,34 @@ sol! {
             string metadataUri
         ) external returns (uint256 pollId);
 
-        /// @notice Manually close a poll before its deadline. Reverts
-        ///         (`Unauthorized`) if the caller isn't `VotingManager.owner`.
+        /// @notice Finalise a poll AFTER its deadline has passed.
+        ///
+        /// @dev No longer an early-close. Closing before the deadline reverts
+        ///      with `PollStillOpen`, because the tally is public and an admin
+        ///      who could close at will could freeze it the moment it favoured
+        ///      them. Use `cancelPoll` for a misconfigured poll nobody has
+        ///      voted in, or `voidPoll` to abandon a running one.
         function closePoll(uint256 pollId) external;
+
+        /// @notice Retire a poll that nobody has voted in yet.
+        ///
+        /// @dev Reverts with `PollHasVotes` once a single ballot has landed,
+        ///      so this can never revoke a vote already cast.
+        function cancelPoll(uint256 pollId, string reason) external;
+
+        /// @notice Abandon a running poll and DISCARD its tally.
+        ///
+        /// @dev Deliberately not a way to win: the tally becomes unreadable,
+        ///      so the only outcome of voiding is "no result", never "the
+        ///      result I was ahead in".
+        function voidPoll(uint256 pollId, string reason) external;
+
+        /// @notice A poll's full lifecycle state.
+        ///
+        /// @dev 0 Nonexistent, 1 Open, 2 Closed, 3 Cancelled, 4 Void. Prefer
+        ///      this over `getPoll`'s `active` flag where the distinction
+        ///      between a finalised result and a discarded one matters.
+        function getPollStatus(uint256 pollId) external view returns (uint8);
 
         /// @notice Cast an anonymous ballot.
         /// @param pollId        Target poll.

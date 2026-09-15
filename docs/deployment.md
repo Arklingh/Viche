@@ -343,6 +343,51 @@ somebody tries to vote, which is the worst possible time to find out.
 
 ---
 
+### 4.6 Poll governance — what the owner key can and cannot do
+
+The `VotingManager` owner is a single address with total administrative
+power, so the contract deliberately constrains *which* powers exist rather
+than relying on that address behaving well.
+
+**Ending a poll.** There are three distinct operations, and the differences
+are load-bearing:
+
+| Operation | When it is allowed | What happens to the tally |
+|---|---|---|
+| `closePoll` | Only **after** the deadline | Stands. It is the result. |
+| `cancelPoll` | Only while **`totalVotes == 0`** | There is none. Nobody voted. |
+| `voidPoll` | Any time while the poll is open | **Discarded.** Unreadable afterwards. |
+
+`closePoll` used to be callable at any moment. That was an integrity hole:
+the tally is public and updates per vote, so an admin could watch it and
+freeze the count exactly when it favoured them. Closing now requires the
+deadline to have passed, at which point voting is already rejected and the
+call decides nothing.
+
+The emergency case — a whitelist found to contain a Sybil batch, a broken
+circuit discovered mid-vote — is served by `voidPoll`, which **destroys the
+result rather than freezing it**. That is the whole design: an admin who
+stops a poll mid-flight cannot keep the favourable partial count, so the
+only outcome of using the power is "no result". Removing the payoff is a
+stronger guarantee than trying to forbid the action. Both `cancelPoll` and
+`voidPoll` require a `reason`, recorded on-chain for audit, and `voidPoll`
+emits the vote count at the moment of voiding so observers can judge the
+decision.
+
+**Handing over ownership** is two steps: the current owner calls
+`transferOwnership(newOwner)`, then the new owner calls `acceptOwnership()`
+from its own address. Ownership does not move until that second call. This
+exists because a single-step transfer to a mistyped address — or to a
+multisig whose signing threshold cannot actually be met — permanently bricks
+poll administration, as the contract has no other privileged role and no
+recovery path. Requiring the recipient to transact proves it can.
+`cancelOwnershipTransfer()` withdraws a proposal before acceptance.
+
+> **Use a multisig.** `owner` is a plain `address`, so it can be an EOA, a
+> multisig, or a timelock with no code change. For any real election it
+> should not be one person's key. The two-step handover above is what makes
+> moving to one safe to attempt.
+
 ## 5. Post-deploy checklist
 
 - [ ] `GET /health` on the relayer returns `200`.
@@ -364,6 +409,13 @@ somebody tries to vote, which is the worst possible time to find out.
       zkey (this is the exact failure mode called out in the
       Prerequisites section, and it doesn't show up until a vote is
       actually cast).
+- [ ] `owner` is a multisig, not a single EOA (§4.6). If it is still the
+      deploying EOA, hand it over now — `transferOwnership` then
+      `acceptOwnership` from the multisig — and confirm `owner()` reflects
+      the change before announcing any poll.
+- [ ] Confirm `closePoll` on a live poll reverts with `PollStillOpen`. This
+      is the close-time guard; if it succeeds, you are running a build that
+      still permits freezing a tally mid-vote.
 
 ---
 

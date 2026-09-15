@@ -265,6 +265,19 @@ where
 {
     let contract = IVotingManager::new(contract_address, &admin_provider);
     let call = contract.closePoll(poll_id);
+
+    // Pre-simulate. The lifecycle guards are restrictive by design and an
+    // admin will hit them — closing before the deadline most of all, since
+    // that used to be permitted. Catching it here turns a burned transaction
+    // and an opaque "execution reverted" into an explanation of which
+    // operation to use instead.
+    if let Err(sim_err) = call.call().await {
+        if let Some(message) = describe_admin_revert(&sim_err) {
+            tracing::info!(poll_id = %poll_id, reason = %message, "closePoll rejected");
+            return Err(RelayError::OnChainRevert(message));
+        }
+    }
+
     check_gas_ceiling(&admin_provider, max_fee_per_gas_wei).await?;
     let pending = call.send().await?;
 
@@ -275,6 +288,93 @@ where
         poll_id = %poll_id,
         tx_hash = %tx_hash_hex,
         "closePoll transaction broadcast"
+    );
+
+    Ok(AdminTxResponse {
+        tx_hash: tx_hash_hex,
+        status: VoteStatus::Broadcast,
+    })
+}
+
+/// Submit a `cancelPoll` transaction — retire a poll nobody has voted in.
+///
+/// # Errors
+///
+/// `PollHasVotes` once any ballot has landed; `PollNotOpen` if the poll's
+/// lifecycle has already ended. Both are pre-simulated into a clear message.
+pub async fn submit_cancel_poll<P, T>(
+    admin_provider: P,
+    contract_address: Address,
+    poll_id: U256,
+    reason: String,
+    max_fee_per_gas_wei: u128,
+) -> Result<AdminTxResponse, RelayError>
+where
+    P: Provider<T, Ethereum>,
+    T: Transport + Clone,
+{
+    let contract = IVotingManager::new(contract_address, &admin_provider);
+    let call = contract.cancelPoll(poll_id, reason);
+
+    if let Err(sim_err) = call.call().await {
+        if let Some(message) = describe_admin_revert(&sim_err) {
+            tracing::info!(poll_id = %poll_id, reason = %message, "cancelPoll rejected");
+            return Err(RelayError::OnChainRevert(message));
+        }
+    }
+
+    check_gas_ceiling(&admin_provider, max_fee_per_gas_wei).await?;
+    let pending = call.send().await?;
+    let tx_hash_hex = format!("{:#x}", pending.tx_hash());
+
+    tracing::info!(poll_id = %poll_id, tx_hash = %tx_hash_hex, "cancelPoll transaction broadcast");
+
+    Ok(AdminTxResponse {
+        tx_hash: tx_hash_hex,
+        status: VoteStatus::Broadcast,
+    })
+}
+
+/// Submit a `voidPoll` transaction — abandon a running poll and discard its
+/// tally.
+///
+/// # Errors
+///
+/// `PollNotOpen` if the poll has already ended. Note there is deliberately no
+/// guard on vote count: voiding a poll mid-flight is the supported emergency,
+/// and it is safe precisely because it destroys the result rather than
+/// freezing it.
+pub async fn submit_void_poll<P, T>(
+    admin_provider: P,
+    contract_address: Address,
+    poll_id: U256,
+    reason: String,
+    max_fee_per_gas_wei: u128,
+) -> Result<AdminTxResponse, RelayError>
+where
+    P: Provider<T, Ethereum>,
+    T: Transport + Clone,
+{
+    let contract = IVotingManager::new(contract_address, &admin_provider);
+    let call = contract.voidPoll(poll_id, reason);
+
+    if let Err(sim_err) = call.call().await {
+        if let Some(message) = describe_admin_revert(&sim_err) {
+            tracing::info!(poll_id = %poll_id, reason = %message, "voidPoll rejected");
+            return Err(RelayError::OnChainRevert(message));
+        }
+    }
+
+    check_gas_ceiling(&admin_provider, max_fee_per_gas_wei).await?;
+    let pending = call.send().await?;
+    let tx_hash_hex = format!("{:#x}", pending.tx_hash());
+
+    // Logged at warn: discarding a live poll's results is a destructive,
+    // rarely-legitimate act and should stand out in an audit of the logs.
+    tracing::warn!(
+        poll_id = %poll_id,
+        tx_hash = %tx_hash_hex,
+        "voidPoll transaction broadcast — poll results discarded"
     );
 
     Ok(AdminTxResponse {
@@ -328,12 +428,81 @@ fn describe_known_revert(err: &ContractError) -> Option<String> {
              whitelist root and vote option)"
                 .to_string(),
         ),
-        // Unauthorized/InvalidDeadline/InvalidNumOptions are createPoll/
-        // closePoll-only — castVote can't revert with them. Not this
-        // function's job to handle (see the admin submit_* functions).
+        // Everything below is an admin-path revert (createPoll, closePoll,
+        // cancelPoll, voidPoll, ownership handover). `castVote` cannot
+        // produce any of them, so this function deliberately declines to
+        // invent a voter-facing message — see `describe_admin_revert`.
         IVotingManagerErrors::Unauthorized(_)
         | IVotingManagerErrors::InvalidDeadline(_)
-        | IVotingManagerErrors::InvalidNumOptions(_) => None,
+        | IVotingManagerErrors::InvalidNumOptions(_)
+        | IVotingManagerErrors::PollStillOpen(_)
+        | IVotingManagerErrors::PollHasVotes(_)
+        | IVotingManagerErrors::PollVoided(_)
+        | IVotingManagerErrors::PollNotOpen(_)
+        | IVotingManagerErrors::NotPendingOwner(_)
+        | IVotingManagerErrors::NoPendingOwner(_) => None,
+    }
+}
+
+/// Decode an admin-path revert (`closePoll`, `cancelPoll`, `voidPoll`) into a
+/// message that says what to do instead.
+///
+/// The lifecycle rules are deliberately restrictive and an admin WILL hit
+/// them — `closePoll` before the deadline is the obvious one, since that used
+/// to be allowed. A bare "execution reverted" there reads as a broken relayer
+/// rather than as the guard doing its job, so each case explains the
+/// alternative operation that does apply.
+pub(crate) fn describe_admin_revert(err: &ContractError) -> Option<String> {
+    let ContractError::TransportError(rpc_err) = err else {
+        return None;
+    };
+    let payload = rpc_err.as_error_resp()?;
+    let decoded = payload.as_decoded_error::<IVotingManagerErrors>(false)?;
+
+    match decoded {
+        IVotingManagerErrors::PollStillOpen(e) => Some(format!(
+            "poll {} cannot be closed until its deadline ({}) has passed. A poll's tally is \
+             public while it runs, so closing early would let the result be frozen at a \
+             chosen moment. To retire a poll nobody has voted in, cancel it; to abandon a \
+             running poll and discard its tally, void it.",
+            e.pollId, e.deadline
+        )),
+        IVotingManagerErrors::PollHasVotes(e) => Some(format!(
+            "poll {} already has {} vote(s) and can no longer be cancelled, because cancelling \
+             would revoke ballots already cast. Void it instead if it must be abandoned — that \
+             discards the tally rather than silently dropping votes.",
+            e.pollId, e.totalVotes
+        )),
+        IVotingManagerErrors::PollNotOpen(e) => Some(format!(
+            "poll {} has already ended (closed, cancelled or voided); its lifecycle is final",
+            e.pollId
+        )),
+        IVotingManagerErrors::PollVoided(e) => Some(format!(
+            "poll {} was voided: its tally is discarded and is not a result",
+            e.pollId
+        )),
+        IVotingManagerErrors::PollDoesNotExist(e) => Some(format!("poll {} does not exist", e.pollId)),
+        IVotingManagerErrors::Unauthorized(_) => Some(
+            "the configured admin key is not the VotingManager owner".to_string(),
+        ),
+        IVotingManagerErrors::InvalidDeadline(_) => {
+            Some("the deadline must be in the future".to_string())
+        }
+        IVotingManagerErrors::InvalidNumOptions(_) => {
+            Some("a poll needs at least two options".to_string())
+        }
+        IVotingManagerErrors::NotPendingOwner(_) => Some(
+            "only the address named by transferOwnership may accept ownership".to_string(),
+        ),
+        IVotingManagerErrors::NoPendingOwner(_) => {
+            Some("there is no ownership transfer to cancel".to_string())
+        }
+        // Voting-path errors; not reachable from the admin calls.
+        IVotingManagerErrors::AlreadyVoted(_)
+        | IVotingManagerErrors::PollNotActive(_)
+        | IVotingManagerErrors::PollEnded(_)
+        | IVotingManagerErrors::InvalidVoteOption(_)
+        | IVotingManagerErrors::InvalidProof(_) => None,
     }
 }
 
@@ -454,6 +623,67 @@ mod tests {
             alloy::transports::TransportErrorKind::BackendGone,
         ));
         assert!(describe_known_revert(&err).is_none());
+    }
+
+    // ---- describe_admin_revert -------------------------------------------
+
+    /// The one an admin will actually hit: closing before the deadline used
+    /// to be allowed, so the message has to explain the alternative rather
+    /// than just refuse.
+    #[test]
+    fn describe_admin_revert_explains_a_premature_close() {
+        let err = revert_error(IVotingManagerErrors::PollStillOpen(
+            crate::contract::IVotingManager::PollStillOpen {
+                pollId: U256::from(3u64),
+                deadline: U256::from(1_893_456_000u64),
+            },
+        ));
+        let msg = describe_admin_revert(&err).unwrap();
+        assert!(msg.contains('3'), "names the poll: {msg}");
+        assert!(msg.contains("1893456000"), "names the deadline: {msg}");
+        assert!(msg.to_lowercase().contains("cancel"), "points at cancel: {msg}");
+        assert!(msg.to_lowercase().contains("void"), "points at void: {msg}");
+    }
+
+    #[test]
+    fn describe_admin_revert_explains_cancelling_a_poll_with_votes() {
+        let err = revert_error(IVotingManagerErrors::PollHasVotes(
+            crate::contract::IVotingManager::PollHasVotes {
+                pollId: U256::from(7u64),
+                totalVotes: U256::from(12u64),
+            },
+        ));
+        let msg = describe_admin_revert(&err).unwrap();
+        assert!(msg.contains("12"), "names the vote count: {msg}");
+        assert!(msg.to_lowercase().contains("void"), "points at void: {msg}");
+    }
+
+    #[test]
+    fn describe_admin_revert_reports_a_finished_lifecycle() {
+        let err = revert_error(IVotingManagerErrors::PollNotOpen(
+            crate::contract::IVotingManager::PollNotOpen { pollId: U256::from(4u64) },
+        ));
+        assert!(describe_admin_revert(&err).unwrap().contains("already ended"));
+    }
+
+    /// The two decoders must not answer for each other's call paths: a voting
+    /// error has no admin meaning, and vice versa. Getting this wrong would
+    /// show a voter an admin message (or the reverse), which is worse than
+    /// showing nothing.
+    #[test]
+    fn the_two_decoders_do_not_answer_for_each_others_paths() {
+        let admin_only = revert_error(IVotingManagerErrors::PollStillOpen(
+            crate::contract::IVotingManager::PollStillOpen {
+                pollId: U256::from(1u64),
+                deadline: U256::from(2u64),
+            },
+        ));
+        assert!(describe_known_revert(&admin_only).is_none());
+
+        let voter_only = revert_error(IVotingManagerErrors::AlreadyVoted(
+            crate::contract::IVotingManager::AlreadyVoted { nullifierHash: B256::ZERO },
+        ));
+        assert!(describe_admin_revert(&voter_only).is_none());
     }
 
     #[test]
