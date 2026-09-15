@@ -86,7 +86,10 @@ use crate::middleware::{
 use crate::queries::{fetch_all_polls, fetch_poll, fetch_tally};
 use crate::ratelimit::RateLimiter;
 use crate::registration::{PendingSummary, RegistrationStore};
-use crate::relay::{format_gwei, submit_close_poll, submit_create_poll, submit_vote, AdminTxResponse};
+use crate::relay::{
+    format_gwei, submit_cancel_poll, submit_close_poll, submit_create_poll, submit_void_poll,
+    submit_vote, AdminTxResponse,
+};
 
 /// Application state shared across all handlers via Axum's `State` extractor.
 ///
@@ -167,6 +170,8 @@ where
     let admin_routes = Router::new()
         .route("/api/admin/polls", post(create_poll::<P, T>))
         .route("/api/admin/polls/:id/close", post(close_poll::<P, T>))
+        .route("/api/admin/polls/:id/cancel", post(cancel_poll::<P, T>))
+        .route("/api/admin/polls/:id/void", post(void_poll::<P, T>))
         .route(
             "/api/admin/registrations/pending",
             get(pending_registrations::<P, T>),
@@ -640,6 +645,97 @@ where
         state.admin_provider,
         state.voting_manager_address,
         poll_id,
+        state.gas.max_fee_per_gas_wei,
+    )
+    .await?;
+    Ok(Json(resp))
+}
+
+/// Body for the two poll-retirement endpoints.
+///
+/// `reason` is not decoration: both operations end a poll early, and both are
+/// recorded on-chain with this string so the decision is publicly auditable
+/// after the fact. It is required rather than optional for exactly that
+/// reason.
+#[derive(Debug, serde::Deserialize)]
+struct RetirePollRequest {
+    reason: String,
+}
+
+/// Longest `reason` accepted. Bounded because it is attacker-influenced only
+/// by the admin, but still ends up as calldata the owner pays gas for.
+const MAX_REASON_LEN: usize = 200;
+
+fn validate_reason(reason: &str) -> Result<String, RelayError> {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return Err(RelayError::Validation(
+            "a reason is required: retiring a poll is recorded on-chain for audit".into(),
+        ));
+    }
+    if trimmed.len() > MAX_REASON_LEN {
+        return Err(RelayError::Validation(format!(
+            "reason must be at most {MAX_REASON_LEN} characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// `POST /api/admin/polls/:id/cancel`
+///
+/// Owner-only. Retires a poll **nobody has voted in** — the escape hatch for a
+/// misconfigured poll. Fails with a clear message once any ballot has landed,
+/// since cancelling then would revoke votes already cast.
+async fn cancel_poll<P, T>(
+    State(state): State<AppState<P>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<RetirePollRequest>,
+) -> Result<Json<AdminTxResponse>, RelayError>
+where
+    P: Provider<T, Ethereum> + Clone + Send + Sync,
+    T: Transport + Clone,
+{
+    require_admin_auth(&headers, &state.admin_api_key)?;
+    let poll_id = parse_poll_id(&id)?;
+    let reason = validate_reason(&req.reason)?;
+
+    let resp = submit_cancel_poll(
+        state.admin_provider,
+        state.voting_manager_address,
+        poll_id,
+        reason,
+        state.gas.max_fee_per_gas_wei,
+    )
+    .await?;
+    Ok(Json(resp))
+}
+
+/// `POST /api/admin/polls/:id/void`
+///
+/// Owner-only. Abandons a running poll and **discards its tally** — the
+/// emergency hatch. Deliberately not a way to win: the result becomes
+/// unreadable rather than frozen, so voiding can only ever produce "no
+/// result", never a favourable partial count.
+async fn void_poll<P, T>(
+    State(state): State<AppState<P>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<RetirePollRequest>,
+) -> Result<Json<AdminTxResponse>, RelayError>
+where
+    P: Provider<T, Ethereum> + Clone + Send + Sync,
+    T: Transport + Clone,
+{
+    require_admin_auth(&headers, &state.admin_api_key)?;
+    let poll_id = parse_poll_id(&id)?;
+    let reason = validate_reason(&req.reason)?;
+
+    let resp = submit_void_poll(
+        state.admin_provider,
+        state.voting_manager_address,
+        poll_id,
+        reason,
         state.gas.max_fee_per_gas_wei,
     )
     .await?;
@@ -1127,6 +1223,29 @@ mod tests {
         }"#;
         let req: CreatePollRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.metadata_uri, "");
+    }
+
+    // ---- validate_reason --------------------------------------------------
+
+    #[test]
+    fn validate_reason_accepts_and_trims() {
+        assert_eq!(validate_reason("  wrong root  ").unwrap(), "wrong root");
+    }
+
+    /// Retiring a poll is recorded on-chain for audit, so an empty reason
+    /// defeats the point of recording it.
+    #[test]
+    fn validate_reason_rejects_blank() {
+        assert!(matches!(validate_reason("   "), Err(RelayError::Validation(_))));
+        assert!(matches!(validate_reason(""), Err(RelayError::Validation(_))));
+    }
+
+    #[test]
+    fn validate_reason_rejects_overlong() {
+        let long = "x".repeat(MAX_REASON_LEN + 1);
+        assert!(matches!(validate_reason(&long), Err(RelayError::Validation(_))));
+        let ok = "x".repeat(MAX_REASON_LEN);
+        assert!(validate_reason(&ok).is_ok());
     }
 
     // ---- parse_poll_id ----------------------------------------------------

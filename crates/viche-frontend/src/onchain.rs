@@ -22,13 +22,25 @@ sol! {
             string metadataUri
         ) external returns (uint256 pollId);
 
+        /// Finalise a poll AFTER its deadline. Reverts with `PollStillOpen`
+        /// before then — closing early would let an admin freeze a public
+        /// tally at a moment that favours them.
         function closePoll(uint256 pollId) external;
+
+        /// Retire a poll nobody has voted in yet (misconfiguration).
+        function cancelPoll(uint256 pollId, string reason) external;
+
+        /// Abandon a running poll and DISCARD its tally. Not a way to win:
+        /// the result becomes unreadable rather than frozen.
+        function voidPoll(uint256 pollId, string reason) external;
 
         function owner() external view returns (address);
     }
 }
 
-use IVotingManagerAdmin::{closePollCall, createPollCall, ownerCall};
+use IVotingManagerAdmin::{
+    cancelPollCall, closePollCall, createPollCall, ownerCall, voidPollCall,
+};
 
 /// Build the calldata for `createPoll(bytes32,uint256,uint256,string)`.
 pub fn encode_create_poll(
@@ -50,6 +62,31 @@ pub fn encode_create_poll(
 pub fn encode_close_poll(poll_id: u64) -> Vec<u8> {
     closePollCall {
         pollId: U256::from(poll_id),
+    }
+    .abi_encode()
+}
+
+/// Build the calldata for `cancelPoll(uint256,string)`.
+///
+/// Only valid before any vote has landed; the contract reverts with
+/// `PollHasVotes` afterwards rather than revoking cast ballots.
+pub fn encode_cancel_poll(poll_id: u64, reason: &str) -> Vec<u8> {
+    cancelPollCall {
+        pollId: U256::from(poll_id),
+        reason: reason.to_string(),
+    }
+    .abi_encode()
+}
+
+/// Build the calldata for `voidPoll(uint256,string)`.
+///
+/// Discards the poll's tally. `reason` is recorded on-chain so the decision
+/// is publicly auditable — this is the one admin power that can end a live
+/// vote, and it is meant to leave a trail.
+pub fn encode_void_poll(poll_id: u64, reason: &str) -> Vec<u8> {
+    voidPollCall {
+        pollId: U256::from(poll_id),
+        reason: reason.to_string(),
     }
     .abi_encode()
 }
@@ -249,5 +286,32 @@ mod wasm_tests {
     #[wasm_bindgen_test]
     fn parse_datetime_local_unix_rejects_garbage_input() {
         assert_eq!(parse_datetime_local_unix("not-a-date"), None);
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_cancel_poll_round_trips_through_abi_decode() {
+        let data = encode_cancel_poll(7, "wrong merkle root");
+        let decoded = cancelPollCall::abi_decode(&data, true).unwrap();
+        assert_eq!(decoded.pollId, U256::from(7u64));
+        assert_eq!(decoded.reason, "wrong merkle root");
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_void_poll_round_trips_through_abi_decode() {
+        let data = encode_void_poll(9, "whitelist compromised");
+        let decoded = voidPollCall::abi_decode(&data, true).unwrap();
+        assert_eq!(decoded.pollId, U256::from(9u64));
+        assert_eq!(decoded.reason, "whitelist compromised");
+    }
+
+    /// Cancel and void must never be confused for one another: they differ
+    /// only in which ballots they are allowed to destroy, so a swapped
+    /// selector would be a silent, severe bug.
+    #[wasm_bindgen_test]
+    fn cancel_and_void_have_distinct_selectors() {
+        let cancel = encode_cancel_poll(1, "r");
+        let void = encode_void_poll(1, "r");
+        assert_ne!(cancel[..4], void[..4]);
+        assert_ne!(cancel[..4], encode_close_poll(1)[..4]);
     }
 }

@@ -51,3 +51,18 @@ mainnet = "${MAINNET_RPC_URL}"
 [etherscan]
 sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 11155111 }
 mainnet = { key = "${ETHERSCAN_API_KEY}", chain = 1 }
+
+# Invariant/fuzz tuning. `fail_on_revert = false` is required here because the
+# handler deliberately drives invalid sequences (voting in a closed poll,
+# replaying a nullifier) and swallows the reverts — the point is that the
+# accounting invariants hold anyway. `show_metrics` prints the per-function
+# call distribution so a vacuous suite (one where the fuzzer never reaches the
+# interesting states) is visible rather than silently green.
+[invariant]
+runs = 256
+depth = 128
+fail_on_revert = false
+show_metrics = true
+
+[fuzz]
+runs = 512
