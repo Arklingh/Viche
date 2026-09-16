@@ -62,6 +62,17 @@ mkdir -p "${BUILD_DIR}" "${PTAU_DIR}" "${CONTRACTS_VERIFIER_DIR}"
 command -v circom   >/dev/null 2>&1 || { echo "ERROR: circom not found. Install: https://docs.circom.io/getting-started/installation/"; exit 1; }
 command -v snarkjs  >/dev/null 2>&1 || { echo "ERROR: snarkjs not found. Install: npm i -g snarkjs"; exit 1; }
 
+# circomlib (the poseidon.circom this circuit includes) ships as an npm
+# dependency, not a binary on PATH. `make setup` installs it, but nothing
+# stops `make circuits` from being run first on a fresh checkout -- without
+# this check that fails deep inside circom with a confusing "file to be
+# included has not been found" rather than anything about npm.
+if [[ ! -f "${ROOT_DIR}/node_modules/circomlib/circuits/poseidon.circom" ]]; then
+    echo ">> circuits/node_modules is missing or incomplete -- running npm ci"
+    command -v npm >/dev/null 2>&1 || { echo "ERROR: npm not found. Install Node.js: https://nodejs.org/"; exit 1; }
+    ( cd "${ROOT_DIR}" && npm ci )
+fi
+
 # ---------------------------------------------------------------------------
 # 1. circom compile -> r1cs + wasm witness generator.
 #    -l adds node_modules (circomlib) to the include path.
