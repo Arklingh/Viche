@@ -255,6 +255,7 @@ where
 /// Reverts with `Unauthorized()` (not the owner) or `PollDoesNotExist(uint256)`.
 pub async fn submit_close_poll<P, T>(
     admin_provider: P,
+    admin_address: Address,
     contract_address: Address,
     poll_id: U256,
     max_fee_per_gas_wei: u128,
@@ -264,7 +265,7 @@ where
     T: Transport + Clone,
 {
     let contract = IVotingManager::new(contract_address, &admin_provider);
-    let call = contract.closePoll(poll_id);
+    let call = contract.closePoll(poll_id).from(admin_address);
 
     // Pre-simulate. The lifecycle guards are restrictive by design and an
     // admin will hit them — closing before the deadline most of all, since
@@ -304,6 +305,7 @@ where
 /// lifecycle has already ended. Both are pre-simulated into a clear message.
 pub async fn submit_cancel_poll<P, T>(
     admin_provider: P,
+    admin_address: Address,
     contract_address: Address,
     poll_id: U256,
     reason: String,
@@ -314,7 +316,7 @@ where
     T: Transport + Clone,
 {
     let contract = IVotingManager::new(contract_address, &admin_provider);
-    let call = contract.cancelPoll(poll_id, reason);
+    let call = contract.cancelPoll(poll_id, reason).from(admin_address);
 
     if let Err(sim_err) = call.call().await {
         if let Some(message) = describe_admin_revert(&sim_err) {
@@ -346,6 +348,7 @@ where
 /// freezing it.
 pub async fn submit_void_poll<P, T>(
     admin_provider: P,
+    admin_address: Address,
     contract_address: Address,
     poll_id: U256,
     reason: String,
@@ -356,7 +359,7 @@ where
     T: Transport + Clone,
 {
     let contract = IVotingManager::new(contract_address, &admin_provider);
-    let call = contract.voidPoll(poll_id, reason);
+    let call = contract.voidPoll(poll_id, reason).from(admin_address);
 
     if let Err(sim_err) = call.call().await {
         if let Some(message) = describe_admin_revert(&sim_err) {
@@ -740,5 +743,74 @@ mod tests {
         assert_eq!(format_gwei(25 * GWEI + GWEI / 4), "25.25");
         // Sub-centi-gwei dust truncates rather than rounding up past the cap.
         assert_eq!(format_gwei(1), "0.00");
+    }
+
+    // ---- admin dry-run sender --------------------------------------------
+
+    /// Serve a one-method JSON-RPC node. It mimics `VotingManager`'s
+    /// `onlyOwner` check: an `eth_call` with no `from` is `Unauthorized`;
+    /// one from `owner` gets past it and hits `PollStillOpen`. Returns the
+    /// node's URL.
+    async fn fake_owner_only_node(owner: Address) -> String {
+        use axum::{routing::post, Json, Router};
+        use serde_json::{json, Value};
+
+        let app = Router::new().route(
+            "/",
+            post(move |Json(req): Json<Value>| async move {
+                let from = req["params"][0]["from"].as_str().map(str::to_lowercase);
+                let revert = if from == Some(format!("{owner:#x}")) {
+                    IVotingManagerErrors::PollStillOpen(crate::contract::IVotingManager::PollStillOpen {
+                        pollId: U256::from(1u64),
+                        deadline: U256::from(1_893_456_000u64),
+                    })
+                } else {
+                    IVotingManagerErrors::Unauthorized(crate::contract::IVotingManager::Unauthorized {})
+                };
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": req["id"],
+                    "error": {
+                        "code": 3,
+                        "message": "execution reverted",
+                        "data": alloy::primitives::hex::encode_prefixed(revert.abi_encode()),
+                    }
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    /// Regression: the admin dry-run used to carry no `from`, so the node saw
+    /// `msg.sender == 0x0` and every owner-only call was reported as
+    /// "the configured admin key is not the owner" — even for the real owner,
+    /// even after the deadline.
+    #[tokio::test]
+    async fn admin_dry_runs_name_the_admin_as_sender() {
+        use alloy::providers::ProviderBuilder;
+
+        let owner = Address::repeat_byte(0xAB);
+        let url = fake_owner_only_node(owner).await;
+        let provider = ProviderBuilder::new().on_http(url.parse().unwrap());
+        let vm = Address::repeat_byte(0x01);
+        let poll = U256::from(1u64);
+
+        let results = [
+            submit_close_poll(&provider, owner, vm, poll, u128::MAX).await,
+            submit_cancel_poll(&provider, owner, vm, poll, "r".into(), u128::MAX).await,
+            submit_void_poll(&provider, owner, vm, poll, "r".into(), u128::MAX).await,
+        ];
+        for r in results {
+            match r {
+                Err(RelayError::OnChainRevert(msg)) => assert!(
+                    !msg.contains("not the VotingManager owner"),
+                    "misreported as unauthorized: {msg}"
+                ),
+                other => panic!("expected an OnChainRevert, got {other:?}"),
+            }
+        }
     }
 }

@@ -23,7 +23,7 @@
       4. Deploys VotingManager (+ Groth16Verifier, if VERIFIER_ADDRESS isn't
          already set) via the existing Foundry script, and captures the
          printed addresses.
-      5. Writes crates/viche-relayer/.env from .env.example (if missing) and
+      5. Writes crates/viche-relayer/.env from the root .env.example (if missing) and
          patches in the freshly deployed addresses.
       6. Resyncs crates/viche-frontend/public/circuits/{vote.wasm,
          vote_final.zkey} from circuits/build/ if they've drifted -- this
@@ -204,7 +204,7 @@ try {
 
         Write-Step "Writing crates/viche-relayer/.env..."
         $envPath = Join-Path $RelayerDir ".env"
-        $envExamplePath = Join-Path $RelayerDir ".env.example"
+        $envExamplePath = Join-Path $RepoRoot ".env.example"
         if (-not (Test-Path $envPath)) {
             Copy-Item $envExamplePath $envPath
         }
@@ -277,6 +277,20 @@ try {
     $script:Procs += [pscustomobject]@{ Name = "viche-relayer"; Proc = $relayerProc }
     if (-not (Wait-ForHttp "http://127.0.0.1:3000/health" 120 "viche-relayer")) { exit 1 }
     Write-Host "   relayer ready on http://127.0.0.1:3000 (pid $($relayerProc.Id))"
+
+    # Trunk's PreBuild hook (tools/build_css.mjs) needs tailwind from the root
+    # npm tree. Without it trunk starts, the build fails, and the script only
+    # reports "trunk did not respond" -- so install it up front.
+    if (-not (Test-Path (Join-Path $RepoRoot "node_modules\tailwindcss"))) {
+        Write-Step "Installing frontend JS deps (npm ci)..."
+        Push-Location $RepoRoot
+        try {
+            npm ci
+            if ($LASTEXITCODE -ne 0) { Write-Error "npm ci failed"; exit 1 }
+        } finally {
+            Pop-Location
+        }
+    }
 
     Write-Step "Starting Trunk (frontend dev server, hot reload)..."
     $frontendLog = Join-Path $LogDir "frontend.log"
