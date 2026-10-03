@@ -236,6 +236,10 @@ pub enum VoteStatus {
 // Poll metadata wire types (Phase 3 — frontend fetches polls from relayer)
 // =========================================================================
 
+fn default_true() -> bool {
+    true
+}
+
 /// A poll's public metadata, returned by the relayer's `GET /api/polls/:id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PollData {
@@ -249,8 +253,16 @@ pub struct PollData {
     pub num_options: U256,
     /// Total number of votes cast so far.
     pub total_votes: U256,
-    /// Whether the poll is currently accepting votes.
+    /// Whether the poll is open: it has not been closed, cancelled or voided.
+    /// This stays `true` past the deadline until an admin calls `closePoll`,
+    /// so it says nothing about whether a vote would be accepted — see
+    /// [`PollData::accepting_votes`].
     pub active: bool,
+    /// Whether a vote submitted right now would be accepted: the poll is
+    /// `active` **and** the chain's clock has not passed the deadline.
+    /// Defaults to `true` when absent (an older relayer).
+    #[serde(default = "default_true")]
+    pub accepting_votes: bool,
     /// Off-chain pointer (or literal text) describing the poll question and
     /// option labels, as supplied at creation time. Not validated or
     /// interpreted here — only stored on-chain in the `PollCreated` event
@@ -333,6 +345,84 @@ pub struct PublishRegistrationRequest {
 pub struct PublishRegistrationResponse {
     /// Number of commitments stored under this root.
     pub commitment_count: usize,
+}
+
+// =========================================================================
+// User-facing error text
+// =========================================================================
+
+/// Turn a relayer error response into a sentence a voter can act on.
+///
+/// The relayer answers failures with `{"code": "...", "message": "..."}`;
+/// shown raw, that reads as `relayer rejected vote (409): {"code":...}`.
+/// This recognises the situations a voter actually hits and says what
+/// happened and what to do. Anything it doesn't recognise falls back to the
+/// relayer's own message, cleaned up, and never to raw JSON.
+pub fn friendly_relayer_error(status: u16, body: &str) -> String {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        code: String,
+        message: String,
+    }
+
+    let parsed = serde_json::from_str::<ErrorBody>(body).ok();
+    let (code, message) = match &parsed {
+        Some(b) => (b.code.as_str(), b.message.as_str()),
+        None => ("", body.trim()),
+    };
+    let message = message.strip_prefix("on-chain revert: ").unwrap_or(message);
+    let lower = message.to_lowercase();
+
+    if lower.contains("voting has closed") {
+        return "Voting on this poll has ended, so your vote was not counted.".into();
+    }
+    if lower.contains("not currently active") {
+        return "This poll is no longer open for voting.".into();
+    }
+    if lower.contains("already voted") {
+        return "You have already voted in this poll. Each voter gets one vote.".into();
+    }
+    if lower.contains("proof was rejected") {
+        return "Your vote could not be verified. Reload the page and try again; if it keeps \
+                failing, contact the poll organiser."
+            .into();
+    }
+    if lower.contains("does not exist") && lower.contains("poll") {
+        return "This poll no longer exists. Reload the page to refresh the list.".into();
+    }
+    if lower.contains("option is not valid") {
+        return "That option is not valid for this poll. Pick another one.".into();
+    }
+
+    match (status, code) {
+        // These already carry a complete sentence written for people.
+        (_, "NOT_ELIGIBLE") | (_, "REGISTRATION_CAP_REACHED") => capitalise(message),
+        (401, _) => "The admin API key was missing or wrong. Check it and try again.".into(),
+        (429, _) => "Too many requests from your connection. Wait a minute and try again.".into(),
+        (_, "GAS_PRICE_TOO_HIGH") | (_, "PROVIDER_ERROR") | (_, "CONTRACT_ERROR")
+        | (502..=504, _) => "The network is busy or the relayer cannot reach it right now. \
+                             Nothing was submitted; try again in a minute."
+            .into(),
+        (500..=599, _) => "Something went wrong on the relayer. Try again; if it keeps \
+                           happening, contact the poll organiser."
+            .into(),
+        _ if message.is_empty() => format!("The relayer rejected the request (status {status})."),
+        _ => capitalise(message),
+    }
+}
+
+/// Upper-case the first character and make sure the sentence ends in a full
+/// stop, so relayer messages read like the hand-written ones above.
+fn capitalise(s: &str) -> String {
+    let mut chars = s.chars();
+    let mut out = match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => return String::new(),
+    };
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -456,5 +546,72 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: PublishRegistrationRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(req, back);
+    }
+
+    // ---- friendly_relayer_error ------------------------------------------
+
+    fn revert(msg: &str) -> String {
+        format!(r#"{{"code":"ON_CHAIN_REVERT","message":"on-chain revert: {msg}"}}"#)
+    }
+
+    #[test]
+    fn a_closed_poll_is_explained_without_json_or_prefixes() {
+        let msg = friendly_relayer_error(409, &revert("voting has closed for poll 1"));
+        assert!(msg.contains("ended"), "{msg}");
+        assert!(!msg.contains('{') && !msg.contains("on-chain"), "{msg}");
+    }
+
+    #[test]
+    fn the_common_voter_reverts_each_get_their_own_advice() {
+        let double = friendly_relayer_error(409, &revert("you have already voted in this poll"));
+        assert!(double.contains("one vote"), "{double}");
+
+        let proof = friendly_relayer_error(
+            409,
+            &revert("the submitted proof was rejected (it must have been generated for this exact poll)"),
+        );
+        assert!(proof.contains("Reload"), "{proof}");
+
+        let ended = friendly_relayer_error(409, &revert("this poll is not currently active"));
+        assert!(ended.contains("no longer open"), "{ended}");
+
+        let gone = friendly_relayer_error(409, &revert("poll 9 does not exist"));
+        assert!(gone.contains("no longer exists"), "{gone}");
+    }
+
+    #[test]
+    fn transport_trouble_says_nothing_was_submitted() {
+        let body = r#"{"code":"PROVIDER_ERROR","message":"provider error: connection refused"}"#;
+        let msg = friendly_relayer_error(502, body);
+        assert!(msg.contains("Nothing was submitted"), "{msg}");
+        assert!(!msg.contains("connection refused"), "internals must not leak: {msg}");
+
+        assert!(friendly_relayer_error(429, "{}").contains("Wait a minute"));
+        assert!(friendly_relayer_error(500, "oops").contains("Something went wrong"));
+    }
+
+    #[test]
+    fn eligibility_messages_pass_through_as_sentences() {
+        let body = r#"{"code":"NOT_ELIGIBLE","message":"that commitment is not on the allowlist"}"#;
+        assert_eq!(
+            friendly_relayer_error(403, body),
+            "That commitment is not on the allowlist."
+        );
+    }
+
+    #[test]
+    fn unknown_failures_never_surface_raw_json() {
+        let body = r#"{"code":"SOMETHING_NEW","message":"a brand new problem"}"#;
+        assert_eq!(friendly_relayer_error(400, body), "A brand new problem.");
+        // Not JSON at all.
+        assert_eq!(friendly_relayer_error(400, "bad thing"), "Bad thing.");
+        assert!(friendly_relayer_error(400, "").contains("status 400"));
+    }
+
+    #[test]
+    fn poll_data_from_an_older_relayer_defaults_to_accepting_votes() {
+        let json = r#"{"poll_id":"0x1","merkle_root":"0x2","deadline":"0x3","num_options":"0x2","total_votes":"0x0","active":true}"#;
+        let p: PollData = serde_json::from_str(json).unwrap();
+        assert!(p.accepting_votes);
     }
 }

@@ -51,6 +51,10 @@ pub fn PollDetail(#[prop(into)] signals: AppSignals, poll_id: String) -> impl In
                         {(!p.metadata_uri.is_empty()).then(|| view! {
                             <p class="text-slate-200 mb-3">{p.metadata_uri.clone()}</p>
                         })}
+                        <p class="text-sm text-slate-200 mb-3">
+                            {crate::components::poll_list::deadline_label(p.active, p.accepting_votes)}
+                            <span class="font-medium">{crate::onchain::format_deadline(p.deadline)}</span>
+                        </p>
                         <p class="text-sm text-slate-400 font-mono break-all" title="Merkle root">
                             "root: " {p.merkle_root.to_string()}
                         </p>
@@ -61,13 +65,25 @@ pub fn PollDetail(#[prop(into)] signals: AppSignals, poll_id: String) -> impl In
 
                     <TallyBars tally=tally.read_only() />
 
-                    <VoteForm
-                        signals=signals.clone()
-                        poll_id=p.poll_id.to_string()
-                        merkle_root=p.merkle_root.to_string()
-                        num_options=p.num_options
-                        selected=selected
-                    />
+                    {if p.accepting_votes {
+                        view! {
+                            <VoteForm
+                                signals=signals.clone()
+                                poll_id=p.poll_id.to_string()
+                                merkle_root=p.merkle_root.to_string()
+                                num_options=p.num_options
+                                selected=selected
+                            />
+                        }.into_view()
+                    } else {
+                        // Don't offer a form that is certain to be rejected
+                        // after the user has spent seconds generating a proof.
+                        view! {
+                            <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 text-slate-300 text-sm">
+                                "Voting on this poll has ended. The tally above is the result."
+                            </div>
+                        }.into_view()
+                    }}
                 }.into_view()
             }}
         </section>

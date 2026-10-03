@@ -15,6 +15,26 @@ use viche_core::wire::{PollData, TallyResponse};
 use crate::contract::IVotingManager;
 use crate::error::RelayError;
 
+/// The chain's own notion of "now": the latest block's timestamp.
+///
+/// The contract compares the deadline against `block.timestamp`, so that is
+/// the clock that decides whether a vote is accepted. Wall-clock time would
+/// disagree with it on a dev chain whose clock has been moved. `None` if the
+/// node cannot be asked; callers then fall back to the poll's own `active`
+/// flag rather than failing a read-only endpoint.
+async fn chain_now<P, T>(provider: &P) -> Option<u64>
+where
+    P: Provider<T, Ethereum>,
+    T: Transport + Clone,
+{
+    provider
+        .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest, false)
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.header.timestamp)
+}
+
 /// Fetch a single poll's core metadata from the contract, without
 /// `metadata_uri` (see [`fetch_poll`], which fills that in separately).
 ///
@@ -24,6 +44,7 @@ async fn fetch_poll_core<P, T>(
     provider: P,
     contract_address: Address,
     poll_id: U256,
+    now: Option<u64>,
 ) -> Result<PollData, RelayError>
 where
     P: Provider<T, Ethereum> + Clone,
@@ -52,6 +73,7 @@ where
         num_options: r.numOptions,
         total_votes: r.totalVotes,
         active: r.active,
+        accepting_votes: r.active && now.map_or(true, |n| U256::from(n) <= r.deadline),
         metadata_uri: String::new(),
     })
 }
@@ -97,7 +119,8 @@ where
     P: Provider<T, Ethereum> + Clone,
     T: Transport + Clone,
 {
-    let mut poll = fetch_poll_core(provider.clone(), contract_address, poll_id).await?;
+    let now = chain_now(&provider).await;
+    let mut poll = fetch_poll_core(provider.clone(), contract_address, poll_id, now).await?;
     poll.metadata_uri = fetch_metadata_uris(provider, contract_address)
         .await
         .remove(&poll_id)
@@ -126,11 +149,12 @@ where
 
     let next_id = contract.nextPollId().call().await?._0;
     let mut metadata = fetch_metadata_uris(provider.clone(), contract_address).await;
+    let now = chain_now(&provider).await;
 
     let mut polls = Vec::new();
     let mut id = U256::from(1u64);
     while id < next_id {
-        match fetch_poll_core(provider.clone(), contract_address, id).await {
+        match fetch_poll_core(provider.clone(), contract_address, id, now).await {
             Ok(mut p) => {
                 p.metadata_uri = metadata.remove(&id).unwrap_or_default();
                 polls.push(p);
@@ -160,7 +184,7 @@ where
 {
     // Only `num_options`/`total_votes` are needed here, so skip the
     // `metadata_uri` log scan that `fetch_poll` would otherwise do.
-    let poll = fetch_poll_core(provider.clone(), contract_address, poll_id).await?;
+    let poll = fetch_poll_core(provider.clone(), contract_address, poll_id, None).await?;
 
     let contract = IVotingManager::new(contract_address, &provider);
 

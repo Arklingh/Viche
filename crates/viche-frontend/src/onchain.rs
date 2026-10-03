@@ -134,6 +134,49 @@ pub fn parse_datetime_local_unix(input: &str) -> Option<u64> {
     Some((millis / 1000.0) as u64)
 }
 
+/// Format a poll deadline (Unix seconds) for display, in the viewer's own
+/// time zone, e.g. "3 Oct 2026, 22:15 GMT+3".
+///
+/// Uses the browser's `Intl.DateTimeFormat`, so the
+/// frontend needs no date library. Falls back to the raw timestamp if the
+/// value is not a representable date, rather than showing nothing.
+pub fn format_deadline(deadline: U256) -> String {
+    let secs = match u64::try_from(deadline) {
+        Ok(s) => s,
+        Err(_) => return deadline.to_string(),
+    };
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(secs as f64 * 1000.0));
+    if date.get_time().is_nan() {
+        return secs.to_string();
+    }
+
+    let opts = js_sys::Object::new();
+    // Individual fields, not `dateStyle`/`timeStyle`: those cannot be
+    // combined with `timeZoneName`, and the constructor throws if they are.
+    // The zone is spelled out because "22:15" alone is ambiguous for a poll
+    // whose organiser and voters may be in different places.
+    for (key, value) in [
+        ("year", "numeric"),
+        ("month", "short"),
+        ("day", "numeric"),
+        ("hour", "2-digit"),
+        ("minute", "2-digit"),
+        ("timeZoneName", "short"),
+    ] {
+        let _ = js_sys::Reflect::set(&opts, &key.into(), &value.into());
+    }
+
+    // English like the rest of the UI (which is not localised); only the time
+    // zone follows the viewer. `en-GB` gives an unambiguous day-first, 24h form.
+    let locales = js_sys::Array::of1(&"en-GB".into());
+    let fmt = js_sys::Intl::DateTimeFormat::new(&locales, &opts);
+    fmt.format()
+        .call1(&wasm_bindgen::JsValue::UNDEFINED, &date)
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| secs.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
