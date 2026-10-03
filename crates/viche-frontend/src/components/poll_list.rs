@@ -83,7 +83,7 @@ fn PollCard(#[prop(into)] signals: AppSignals, poll: PollData) -> impl IntoView 
             <div class="flex items-start justify-between gap-4">
                 <div>
                     <div class="flex items-center gap-2 mb-1">
-                        <PollStatusBadge active=poll.active />
+                        <PollStatusBadge active=poll.active accepting=poll.accepting_votes />
                         <span class="text-xs text-slate-500">"Poll #"{poll_id.clone()}</span>
                     </div>
                     {(!poll.metadata_uri.is_empty()).then(|| view! {
@@ -110,9 +110,16 @@ fn PollCard(#[prop(into)] signals: AppSignals, poll: PollData) -> impl IntoView 
 
 /// Coloured status pill.
 #[component]
-fn PollStatusBadge(active: bool) -> impl IntoView {
+fn PollStatusBadge(active: bool, accepting: bool) -> impl IntoView {
     let (label, classes) = if !active {
         ("Closed", "bg-slate-700 text-slate-300")
+    } else if !accepting {
+        // Open on-chain but past its deadline: it stays "open" until an admin
+        // closes it, but no vote will be accepted.
+        (
+            "Voting ended",
+            "bg-amber-900/40 text-amber-200 border border-amber-800",
+        )
     } else {
         (
             "Active",

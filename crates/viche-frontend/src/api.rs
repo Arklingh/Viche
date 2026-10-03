@@ -11,7 +11,8 @@ use gloo_net::http::{Request, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use viche_core::wire::{
-    CommitmentListResponse, PollData, PollListResponse, PublishRegistrationRequest,
+    friendly_relayer_error, CommitmentListResponse, PollData, PollListResponse,
+    PublishRegistrationRequest,
     PublishRegistrationResponse, RegisterRequest, RegisterResponse, TallyResponse, VoteRequest,
     VoteResponse,
 };
@@ -165,7 +166,7 @@ impl ApiClient {
             .map_err(|e| anyhow!("failed to serialise vote request: {:?}", e))?
             .send()
             .await
-            .map_err(|e| anyhow!("submit_vote request failed: {:?}", e))?;
+            .map_err(|e| relayer_unreachable("submit_vote", e))?;
 
         if resp.ok() {
             decode_json(resp).await
@@ -175,7 +176,7 @@ impl ApiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unreadable body>".into());
-            Err(anyhow!("relayer rejected vote ({}): {}", status, text))
+            Err(anyhow!(friendly_relayer_error(status, &text)))
         }
     }
 
@@ -198,7 +199,7 @@ impl ApiClient {
             .map_err(|e| anyhow!("failed to serialise register request: {:?}", e))?
             .send()
             .await
-            .map_err(|e| anyhow!("register request failed: {:?}", e))?;
+            .map_err(|e| relayer_unreachable("register", e))?;
         Self::decode_or_error(resp, "POST /api/register").await
     }
 
@@ -212,7 +213,7 @@ impl ApiClient {
             .header("Authorization", &format!("Bearer {}", admin_api_key))
             .send()
             .await
-            .map_err(|e| anyhow!("GET {} failed: {:?}", url, e))?;
+            .map_err(|e| relayer_unreachable(&url, e))?;
         let body: CommitmentListResponse =
             Self::decode_or_error(resp, "GET /api/admin/registrations/pending").await?;
         Ok(body.commitments)
@@ -264,7 +265,7 @@ impl ApiClient {
             .map_err(|e| anyhow!("failed to serialise {} request: {:?}", action, e))?
             .send()
             .await
-            .map_err(|e| anyhow!("POST {} failed: {:?}", url, e))?;
+            .map_err(|e| relayer_unreachable(&url, e))?;
         Self::decode_or_error(resp, &format!("POST /api/admin/registrations/{action}")).await
     }
 
@@ -323,7 +324,7 @@ impl ApiClient {
             .map_err(|e| anyhow!("failed to serialise publish request: {:?}", e))?
             .send()
             .await
-            .map_err(|e| anyhow!("POST {} failed: {:?}", url, e))?;
+            .map_err(|e| relayer_unreachable(&url, e))?;
         Self::decode_or_error(resp, "POST /api/admin/registrations/publish").await
     }
 
@@ -333,7 +334,7 @@ impl ApiClient {
         let resp = Request::get(url)
             .send()
             .await
-            .map_err(|e| anyhow!("GET {} failed: {:?}", url, e))?;
+            .map_err(|e| relayer_unreachable(&url, e))?;
         if resp.ok() {
             Ok(resp)
         } else {
@@ -342,7 +343,7 @@ impl ApiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unreadable body>".into());
-            Err(anyhow!("GET {} returned {}: {}", url, status, text))
+            Err(anyhow!(friendly_relayer_error(status, &text)))
         }
     }
 
@@ -359,9 +360,19 @@ impl ApiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unreadable body>".into());
-            Err(anyhow!("{} returned {}: {}", what, status, text))
+            {
+                leptos::logging::warn!("{what} returned {status}: {text}");
+                Err(anyhow!(friendly_relayer_error(status, &text)))
+            }
         }
     }
+}
+
+/// The error for a request that never got an answer. The technical detail goes
+/// to the browser console; the user sees a plain sentence.
+fn relayer_unreachable(what: &str, e: impl std::fmt::Debug) -> anyhow::Error {
+    leptos::logging::warn!("{what} failed: {e:?}");
+    anyhow!("Could not reach the relayer. Check your connection and try again.")
 }
 
 /// Decode a JSON body into `T`, surfacing parse errors with the raw text.

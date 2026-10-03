@@ -403,7 +403,7 @@ pub fn cast_vote(signals: AppSignals, poll_id: String, merkle_root: String, opti
                 fetch_tally(signals, poll_id);
             }
             Err(e) => {
-                signals.vote_failed(format!("Relayer error: {}", e));
+                signals.vote_failed(e.to_string());
             }
         }
     });
@@ -673,7 +673,7 @@ pub fn register_to_vote(signals: AppSignals) {
         let client = ApiClient::new(relayer_url());
         match client.register(&RegisterRequest { commitment }).await {
             Ok(resp) => signals.register_done(resp.total_pending),
-            Err(e) => signals.register_failed(format!("Relayer error: {}", e)),
+            Err(e) => signals.register_failed(e.to_string()),
         }
     });
 }
@@ -894,7 +894,7 @@ fn submit_review(signals: AppSignals, admin_api_key: String, action: ReviewActio
                 // rather than leaving a list that no longer reflects it.
                 signals.pending_commitments.set(None);
             }
-            Err(e) => signals.review_failed(format!("Relayer error: {}", e)),
+            Err(e) => signals.review_failed(e.to_string()),
         }
     });
 }
