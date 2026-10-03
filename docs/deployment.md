@@ -21,10 +21,11 @@ that outlives your terminal session.
 - A funded deployer EOA (pays for `VotingManager` + `Groth16Verifier`
   deployment) and a **separate** funded relayer EOA (pays gas for every
   `castVote`). Keep these different from your local anvil throwaway keys.
-- A **third**, separate EOA for `ADMIN_PRIVATE_KEY` if you want the
-  relayer's `/api/admin/*` HTTP path available (optional — the admin UI's
-  wallet-direct `createPoll`/`closePoll` path needs no relayer key at all).
-  See `crates/viche-relayer/.env.example` for why these are kept apart.
+- A **third**, separate key for `ADMIN_PRIVATE_KEY`, which must be the
+  deployed `VotingManager`'s owner. The relayer **refuses to start** without
+  it and without `ADMIN_API_KEY`, even if you only ever administer polls from
+  the admin UI's wallet-direct path. See the root `.env.example` for why the
+  keys are kept apart.
 - `make circuits` already run, so `circuits/build/vote_final.zkey`,
   `circuits/build/vote_js/vote.wasm`, and
   `contracts/src/verifier/Groth16Verifier.sol` are all present and mutually
@@ -110,12 +111,16 @@ dependency on `viche-core`.)
 
 ### 3.2 Configure
 
-Copy `crates/viche-relayer/.env.example` and fill in real values for the
-target network:
+The root `.env.example` documents every variable, including the optional
+hardening knobs (rate limits, body caps, gas ceiling, registration policy).
+Start from it, then set real values for the target network:
 
 ```bash
-cp crates/viche-relayer/.env.example crates/viche-relayer/.env.sepolia
+cp .env.example crates/viche-relayer/.env.sepolia
 ```
+
+Delete the lines you do not need (the deployer `PRIVATE_KEY`, for one, does
+not belong on the relayer host). The required ones are:
 
 ```
 RELAYER_PRIVATE_KEY=<funded relayer EOA, NOT the deployer key>
@@ -130,6 +135,12 @@ RELAYER_LISTEN_PORT=3000
 
 `ADMIN_API_KEY=dev-only-change-me` (the local-dev default) **must** be
 replaced — it gates the registration-management and admin HTTP endpoints.
+
+`.env.example` also ships `REGISTRATION_ELIGIBILITY=open` so the local dev loop
+works with no setup. That is Sybil-farmable: anyone can register any number of
+commitments. For a real deployment set it to `invite-code` (and supply
+`REGISTRATION_INVITE_CODES`) or `allowlist` (and `REGISTRATION_ALLOWLIST_FILE`);
+the relayer refuses to start if you pick one without its configuration.
 
 ### 3.3 Run
 
