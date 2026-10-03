@@ -58,7 +58,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /app/target/release/viche-relayer /usr/local/bin/viche-relayer
 
 # Config comes entirely from environment variables (see
-# crates/viche-relayer/.env.example) — no config file is baked into the
+# the root .env.example) — no config file is baked into the
 # image. REGISTRATIONS_FILE defaults to a relative path, so give it a fixed,
 # writable home and a volume mount point for persistence across restarts.
 ENV REGISTRATIONS_FILE=/data/registrations.json
