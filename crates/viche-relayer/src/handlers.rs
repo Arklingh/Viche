@@ -103,6 +103,11 @@ pub struct AppState<P> {
     pub provider: P,
     /// Signs `createPoll`/`closePoll`. Must be the `VotingManager` owner.
     pub admin_provider: P,
+    /// Address of the key behind [`Self::admin_provider`]. Admin dry-runs must
+    /// name it as `from`: an `eth_call` has no signer, so without it the
+    /// contract sees `msg.sender == 0x0` and every owner-only call looks
+    /// `Unauthorized`.
+    pub admin_address: Address,
     pub voting_manager_address: Address,
     /// Shared secret required on `/api/admin/*` requests.
     pub admin_api_key: String,
@@ -643,6 +648,7 @@ where
 
     let resp = submit_close_poll(
         state.admin_provider,
+        state.admin_address,
         state.voting_manager_address,
         poll_id,
         state.gas.max_fee_per_gas_wei,
@@ -702,6 +708,7 @@ where
 
     let resp = submit_cancel_poll(
         state.admin_provider,
+        state.admin_address,
         state.voting_manager_address,
         poll_id,
         reason,
@@ -733,6 +740,7 @@ where
 
     let resp = submit_void_poll(
         state.admin_provider,
+        state.admin_address,
         state.voting_manager_address,
         poll_id,
         reason,
@@ -1400,6 +1408,7 @@ mod tests {
             AppState {
                 provider: provider.clone(),
                 admin_provider: provider,
+                admin_address: Address::ZERO,
                 voting_manager_address: Address::ZERO,
                 admin_api_key: "test-admin-key".into(),
                 registrations,

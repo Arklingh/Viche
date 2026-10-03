@@ -156,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         .wallet(wallet)
         .on_http(rpc_url.clone());
 
+    let admin_address = cfg.admin_private_key.address();
     let admin_wallet: EthereumWallet = cfg.admin_private_key.into();
     let admin_provider = ProviderBuilder::new()
         .with_recommended_fillers()
@@ -189,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         provider,
         admin_provider,
+        admin_address,
         voting_manager_address: cfg.voting_manager_address,
         admin_api_key: cfg.admin_api_key,
         registrations,
