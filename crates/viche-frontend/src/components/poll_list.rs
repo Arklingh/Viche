@@ -93,6 +93,10 @@ fn PollCard(#[prop(into)] signals: AppSignals, poll: PollData) -> impl IntoView 
                         {poll.num_options.to_string()}
                         " options"
                     </p>
+                    <p class="text-xs text-slate-400 mt-1" title="Voting deadline">
+                        {deadline_label(poll.active, poll.accepting_votes)}
+                        {crate::onchain::format_deadline(poll.deadline)}
+                    </p>
                 </div>
                 <div class="text-right">
                     <p class="text-2xl font-semibold text-brand-400">
@@ -105,6 +109,17 @@ fn PollCard(#[prop(into)] signals: AppSignals, poll: PollData) -> impl IntoView 
                 "root " {shorten_hex(&poll.merkle_root.to_string())}
             </p>
         </button>
+    }
+}
+
+/// Prefix for the deadline line: "Voting closes" while votes are being
+/// accepted, "Voting closed" once they are not (past the deadline, or the
+/// poll was closed, cancelled or voided).
+pub fn deadline_label(active: bool, accepting: bool) -> &'static str {
+    if active && accepting {
+        "Voting closes "
+    } else {
+        "Voting closed "
     }
 }
 

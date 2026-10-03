@@ -51,6 +51,10 @@ pub fn PollDetail(#[prop(into)] signals: AppSignals, poll_id: String) -> impl In
                         {(!p.metadata_uri.is_empty()).then(|| view! {
                             <p class="text-slate-200 mb-3">{p.metadata_uri.clone()}</p>
                         })}
+                        <p class="text-sm text-slate-200 mb-3">
+                            {crate::components::poll_list::deadline_label(p.active, p.accepting_votes)}
+                            <span class="font-medium">{crate::onchain::format_deadline(p.deadline)}</span>
+                        </p>
                         <p class="text-sm text-slate-400 font-mono break-all" title="Merkle root">
                             "root: " {p.merkle_root.to_string()}
                         </p>
